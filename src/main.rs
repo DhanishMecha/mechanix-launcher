@@ -173,6 +173,7 @@ fn main() {
     app.insert_resource(icons);
 
     app.add_module(RingModule::default())
+        .add_module(TimerModule)
         .add_module(DBusModule::new().system().session())
         .add_module(
             WaylandModule::new()
@@ -212,7 +213,9 @@ mod tests {
             .add_module(AnimationModule)
             .add_module(RenderModule::default())
             .insert_resource(Atlas::new());
-        app.add_module(MechanixTheme::dark());
+        app.add_module(MechanixTheme::dark())
+            .add_module(RingModule::default())
+            .add_module(TimerModule);
         let font = app
             .resource_mut::<Atlas>()
             .add_font(GEIST_MONO_BYTES)

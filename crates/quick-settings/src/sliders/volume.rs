@@ -1,4 +1,4 @@
-use mecha_wayland::mechanix_widgets::prelude::{SliderChange, slider};
+use mecha_wayland::mechanix_widgets::{SliderChange, slider};
 use mecha_wayland::prelude::*;
 
 use crate::util::load_icon;

@@ -1,6 +1,7 @@
 //! Full-panel confirmation for shutdown and restart.
+use mecha_wayland::mechanix_widgets::ButtonSize;
 use mecha_wayland::mechanix_widgets::prelude::{
-    Button, ButtonContextExt, ButtonSize, ButtonVariant, Text, TextContextExt, button, text,
+    Button, ButtonContextExt, ButtonVariant, Text, TextContextExt, button, text,
 };
 use mecha_wayland::prelude::*;
 
@@ -190,11 +191,11 @@ mod tests {
         let mut app = App::new();
         app.add_module(LayoutModule)
             .add_module(PaintModule)
-            .add_module(MechanixTheme::dark());
+            .add_module(MechanixTheme::dark())
+            .add_module(RingModule::default())
+            .add_module(TimerModule);
         let mut atlas = Atlas::new();
-        let font = atlas
-            .add_font(assets::fonts::GEIST_MONO)
-            .unwrap();
+        let font = atlas.add_font(assets::fonts::GEIST_MONO).unwrap();
         app.insert_resource(atlas);
         app.insert_resource(FontBook::new(font));
         app.insert_resource(Requests {
