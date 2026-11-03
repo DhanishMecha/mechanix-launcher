@@ -121,7 +121,7 @@ mod tests {
                 .expect("header shows the date");
             (date.interval(), date.text())
         };
-        assert_eq!(interval, ClockInterval::Minute);
+        assert_eq!(interval, ClockInterval::Second);
         let native = app.widget::<Text>(date_text).unwrap().native();
         let label = &app
             .widget::<mecha_wayland::prelude::Text>(native)

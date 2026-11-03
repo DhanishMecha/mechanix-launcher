@@ -27,11 +27,11 @@ impl Widget for Header {
             .justify(Justify::SpaceBetween)
             .padding(Insets::new(px(0.0), px(20.0), px(0.0), px(20.0)));
 
-        // Ticks at local midnight so the date rolls over.
+        // Ticks every second.
         s.spawn(
             me,
             clock(DATE_FORMAT)
-                .interval(ClockInterval::Day)
+                .interval(ClockInterval::Second)
                 .variant(TextVariant::TitleSmall)
                 .color(ColorRole::OnSurfaceVariant),
         );
