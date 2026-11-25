@@ -31,7 +31,8 @@ struct PendingCall {
 pub(crate) struct Agent {
     bus: BusId,
     export: Option<ExportId>,
-    /// The only caller taken.
+    /// The only caller taken: bluetoothd's unique name, while
+    /// registered. Set by `register`, which reads it back from here.
     bluetoothd: Option<BusName>,
     next_id: u64,
     active: Option<PendingCall>,
@@ -391,7 +392,7 @@ pub(crate) fn set_bluetoothd(app: &mut App, bluetoothd: Option<BusName>) {
     drop_all(app);
 }
 
-#[cfg(test)]
+/// The bluetoothd registered with, if any.
 pub(crate) fn bluetoothd(app: &App) -> Option<BusName> {
     app.resource::<Agent>().bluetoothd.clone()
 }

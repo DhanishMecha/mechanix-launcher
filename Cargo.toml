@@ -20,6 +20,7 @@ mecha-pulseaudio.workspace = true
 lockscreen.workspace = true
 power-menu.workspace = true
 polkit-agent.workspace = true
+bluetooth-agent.workspace = true
 services.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

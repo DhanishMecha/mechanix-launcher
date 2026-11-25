@@ -6,7 +6,8 @@
 //! runs without an agent; a refused default leaves it registered.
 //! bluetoothd drops the registration when the launcher leaves the bus.
 //! The agent takes calls only from the bluetoothd that answered, and
-//! registers again whenever bluetoothd (re)appears.
+//! registers again whenever bluetoothd (re)appears. Which bluetoothd
+//! that is lives in the agent alone ([`agent::bluetoothd`]).
 
 use mecha_wayland::prelude::*;
 
@@ -34,8 +35,6 @@ enum Step {
 struct Registration {
     bus: BusId,
     call: Option<(CallId, Step)>,
-    /// bluetoothd's unique name, while registered.
-    bluetoothd: Option<BusName>,
     owner_changed: Option<MatchId>,
 }
 impl Resource for Registration {}
@@ -57,7 +56,6 @@ pub(crate) fn install(app: &mut App, bus: BusId) {
     app.insert_resource(Registration {
         bus,
         call: None,
-        bluetoothd: None,
         owner_changed,
     });
     app.system(on_reply)
@@ -120,7 +118,6 @@ fn on_reply(app: &mut App, e: &MethodReply) {
                 return;
             };
             tracing::info!("bluetooth: agent registered with {bluetoothd}");
-            app.resource_mut::<Registration>().bluetoothd = Some(bluetoothd.clone());
             agent::set_bluetoothd(app, Some(bluetoothd));
             send(
                 app,
@@ -145,26 +142,13 @@ fn on_owner_changed(app: &mut App, e: &SignalReceived) {
     let Ok((_, _, new_owner)) = e.msg.body::<(String, String, String)>() else {
         return;
     };
-    let gone = {
-        let mut reg = app.resource_mut::<Registration>();
-        let gone = reg
-            .bluetoothd
-            .as_ref()
-            .is_some_and(|b| b.as_str() != new_owner);
-        if gone {
-            reg.bluetoothd = None;
-        }
-        gone
-    };
+    let gone = agent::bluetoothd(app).is_some_and(|b| b.as_str() != new_owner);
     if gone {
         tracing::warn!("bluetooth: bluetoothd went away, its requests are dropped");
         agent::set_bluetoothd(app, None);
     }
     // A registration in flight already reaches the new bluetoothd.
-    let idle = {
-        let reg = app.resource::<Registration>();
-        reg.bluetoothd.is_none() && reg.call.is_none()
-    };
+    let idle = agent::bluetoothd(app).is_none() && app.resource::<Registration>().call.is_none();
     if idle && !new_owner.is_empty() {
         register(app);
     }
@@ -174,7 +158,6 @@ fn on_disconnect(app: &mut App, e: &BusDisconnected) {
     let mut reg = app.resource_mut::<Registration>();
     if e.bus == reg.bus {
         reg.call = None;
-        reg.bluetoothd = None;
     }
 }
 
