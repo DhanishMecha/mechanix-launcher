@@ -13,12 +13,13 @@
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
 
+use super::device;
 use super::interface::{
     ACCESS_DENIED, AGENT_PATH, BLUEZ, CANCELED, DEVICE_IFACE, REJECTED, agent_spec,
 };
 use crate::signals::{
-    DeviceInfo, PairingAbort, PairingAnswer, PairingCancelled, PairingRequested, PairingUpdated,
-    Reply, Request, RequestKind, valid_passkey, valid_pin,
+    DeviceInfo, PairingAbort, PairingAnswer, PairingCancelled, PairingDevice, PairingRequested,
+    PairingUpdated, Reply, Request, RequestKind, valid_passkey, valid_pin,
 };
 
 /// A request, and its call, kept unanswered.
@@ -75,6 +76,7 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         .system(on_abort)
         .system(on_abort_reply)
         .system(on_disconnect);
+    device::install(app, bus);
     exported
 }
 
@@ -176,9 +178,10 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
         return;
     }
     tracing::info!("bluetooth: {} for {path}", call.member());
+    let id = next_id(app);
     let request = Request {
-        id: next_id(app),
-        device: device_info(path),
+        id,
+        device: device::from_path(path.clone()),
         kind,
     };
     app.resource_mut::<Agent>().active = Some(PendingCall {
@@ -186,6 +189,7 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
         call: call.clone(),
     });
     app.signal(PairingRequested(request));
+    device::read(app, id, &path);
 }
 
 /// A code to show, already answered. A passkey while one is shown only
@@ -216,13 +220,15 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
         return;
     }
     tracing::info!("bluetooth: showing a code for {path}");
+    let id = next_id(app);
     let request = Request {
-        id: next_id(app),
-        device: device_info(path),
+        id,
+        device: device::from_path(path.clone()),
         kind,
     };
     app.resource_mut::<Agent>().shown = Some(request.clone());
     app.signal(PairingRequested(request));
+    device::read(app, id, &path);
 }
 
 fn next_id(app: &mut App) -> u64 {
@@ -232,22 +238,25 @@ fn next_id(app: &mut App) -> u64 {
     id
 }
 
-/// What the path says until the device's properties are read:
-/// `…/dev_AA_BB_CC_DD_EE_FF` is `AA:BB:CC:DD:EE:FF`.
-pub(crate) fn device_info(path: ObjectPath) -> DeviceInfo {
-    let address = path
-        .as_str()
-        .rsplit('/')
-        .next()
-        .and_then(|last| last.strip_prefix("dev_"))
-        .map(|a| a.replace('_', ":"))
-        .unwrap_or_else(|| path.as_str().to_owned());
-    DeviceInfo {
-        path,
-        name: address.clone(),
-        address,
-        icon: None,
-    }
+/// Request `id`'s device was read: keep what `change` makes of it, and
+/// tell the dialog. Nothing if the request has ended.
+pub(crate) fn update_device(app: &mut App, id: u64, change: impl FnOnce(DeviceInfo) -> DeviceInfo) {
+    let device = {
+        let mut agent = app.resource_mut::<Agent>();
+        let agent = &mut *agent;
+        let request = agent
+            .active
+            .as_mut()
+            .map(|k| &mut k.request)
+            .filter(|r| r.id == id)
+            .or_else(|| agent.shown.as_mut().filter(|r| r.id == id));
+        let Some(request) = request else {
+            return;
+        };
+        request.device = change(request.device.clone());
+        request.device.clone()
+    };
+    app.signal(PairingDevice { id, device });
 }
 
 fn on_answer(app: &mut App, e: &PairingAnswer) {

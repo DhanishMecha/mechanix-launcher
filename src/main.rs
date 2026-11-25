@@ -324,10 +324,8 @@ fn main() {
     app.add_module(navigation(cfg, AppDrawer::new()))
         .add_module(StatusBarModule)
         .add_module(NotificationsModule)
-        // Before the keyboard, so its keys show over the dialog.
+        // Before the keyboard, so its keys show over the dialogs.
         .add_module(PolkitAgentModule)
-        // No pairing dialog yet: requests wait until bluetoothd times
-        // them out.
         .add_module(BluetoothAgentModule)
         .add_module(KeyboardModule { bottom_gap })
         .add_module(QuickSettingsModule)

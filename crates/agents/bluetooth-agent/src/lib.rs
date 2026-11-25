@@ -17,8 +17,8 @@ use mecha_wayland::prelude::*;
 pub use bus::interface::AGENT_PATH;
 pub use signals::{
     DeviceInfo, MAX_PASSKEY, MAX_PIN_LEN, PairingAbort, PairingAnswer, PairingCancelled,
-    PairingRequested, PairingUpdated, Reply, Request, RequestKind, format_passkey, valid_passkey,
-    valid_pin,
+    PairingDevice, PairingRequested, PairingUpdated, Reply, Request, RequestKind, format_passkey,
+    valid_passkey, valid_pin,
 };
 
 /// The Bluetooth pairing agent. Installs after `RingModule`,

@@ -305,3 +305,61 @@ fn another_requests_signals_are_ignored() {
     assert!(is_open(&app));
     assert!(!shown(&app, parts(&app).progress));
 }
+
+#[test]
+fn the_device_is_named_once_read_and_typing_survives_it() {
+    let mut app = asking(RequestKind::Passkey);
+    let p = parts(&app);
+    type_into(&mut app, p.passkey, "12");
+
+    let mut device = app.resource::<Dialog>().shown.clone().unwrap().device;
+    device.name = "OnePlus 12".into();
+    signal(&mut app, PairingDevice { id: 1, device });
+
+    assert_eq!(text_of(&app, p.name), "OnePlus 12");
+    // The address shows under a name.
+    assert!(shown(&app, p.address));
+    assert_eq!(text_of(&app, p.address), "AA:BB:CC:DD:EE:FF");
+    assert_eq!(
+        app.widget::<Input>(p.passkey.input.id()).unwrap().text(),
+        "12"
+    );
+}
+
+#[test]
+fn another_requests_device_is_ignored() {
+    let mut app = asking(RequestKind::Authorization);
+    let mut device = app.resource::<Dialog>().shown.clone().unwrap().device;
+    device.name = "Someone else".into();
+    signal(&mut app, PairingDevice { id: 9, device });
+    assert_eq!(text_of(&app, parts(&app).name), "AA:BB:CC:DD:EE:FF");
+}
+
+fn avatar(app: &App) -> SpriteId {
+    let view = app.resource::<Dialog>().view;
+    app.widget::<PairingDialog>(view).unwrap().avatar
+}
+
+fn device_named(app: &mut App, id: u64, icon: Option<&str>) {
+    let mut device = app.resource::<Dialog>().shown.clone().unwrap().device;
+    device.icon = icon.map(str::to_owned);
+    signal(app, PairingDevice { id, device });
+}
+
+#[test]
+fn the_avatar_shows_the_kind_of_device() {
+    let mut app = asking(RequestKind::Confirmation(42));
+    let icons = *app.resource::<Icons>();
+    // Bluetooth's until the device is read.
+    assert_eq!(avatar(&app), icons.bluetooth);
+
+    device_named(&mut app, 1, Some("phone"));
+    assert_eq!(avatar(&app), icons.devices[DeviceKind::Phone as usize]);
+
+    // Back to Bluetooth's once closed, and for a kind without its own.
+    signal(&mut app, PairingCancelled { id: 1 });
+    assert_eq!(avatar(&app), icons.bluetooth);
+    request(&mut app, 2, RequestKind::Authorization);
+    device_named(&mut app, 2, Some("modem"));
+    assert_eq!(avatar(&app), icons.bluetooth);
+}

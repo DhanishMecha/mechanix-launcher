@@ -95,6 +95,57 @@ pub(super) fn read_passkey(typed: &str) -> Result<u32, &'static str> {
         .ok_or(PASSKEY_ERROR)
 }
 
+/// The kind of device, for its icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeviceKind {
+    Phone,
+    Laptop,
+    Headphones,
+    Speaker,
+    Keyboard,
+    Mouse,
+    GameController,
+    Pen,
+    Display,
+    Camera,
+    Printer,
+}
+
+impl DeviceKind {
+    pub(super) const ALL: [DeviceKind; 11] = [
+        DeviceKind::Phone,
+        DeviceKind::Laptop,
+        DeviceKind::Headphones,
+        DeviceKind::Speaker,
+        DeviceKind::Keyboard,
+        DeviceKind::Mouse,
+        DeviceKind::GameController,
+        DeviceKind::Pen,
+        DeviceKind::Display,
+        DeviceKind::Camera,
+        DeviceKind::Printer,
+    ];
+}
+
+/// The kind of device by bluetoothd's `Icon`, a freedesktop icon name;
+/// `None` for one without its own icon.
+pub(super) fn device_kind(icon: &str) -> Option<DeviceKind> {
+    Some(match icon {
+        "phone" => DeviceKind::Phone,
+        "computer" => DeviceKind::Laptop,
+        "audio-headset" | "audio-headphones" => DeviceKind::Headphones,
+        "audio-card" | "multimedia-player" => DeviceKind::Speaker,
+        "input-keyboard" => DeviceKind::Keyboard,
+        "input-mouse" => DeviceKind::Mouse,
+        "input-gaming" => DeviceKind::GameController,
+        "input-tablet" => DeviceKind::Pen,
+        "video-display" | "camera-video" => DeviceKind::Display,
+        "camera-photo" => DeviceKind::Camera,
+        "printer" => DeviceKind::Printer,
+        _ => return None,
+    })
+}
+
 /// What a service is for, in a few words, by its UUID.
 pub(super) fn service_name(uuid: &str) -> Option<&'static str> {
     let uuid = uuid.to_ascii_lowercase();
@@ -137,6 +188,23 @@ mod tests {
             message(&RequestKind::Service("x".into())),
             "This device wants to use service x."
         );
+    }
+
+    #[test]
+    fn devices_are_known_by_their_icon_name() {
+        assert_eq!(device_kind("phone"), Some(DeviceKind::Phone));
+        assert_eq!(
+            device_kind("audio-headphones"),
+            Some(DeviceKind::Headphones)
+        );
+        assert_eq!(device_kind("audio-headset"), Some(DeviceKind::Headphones));
+        assert_eq!(device_kind("input-keyboard"), Some(DeviceKind::Keyboard));
+        assert_eq!(device_kind("modem"), None);
+        assert_eq!(device_kind(""), None);
+        // Each kind has its place in ALL.
+        for (i, kind) in DeviceKind::ALL.into_iter().enumerate() {
+            assert_eq!(kind as usize, i);
+        }
     }
 
     #[test]

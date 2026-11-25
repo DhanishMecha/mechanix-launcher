@@ -1,7 +1,7 @@
 //! The signals between the agent's parts, and the request they carry.
 //!
-//! The bus side raises [`PairingRequested`], [`PairingUpdated`] and
-//! [`PairingCancelled`]. The dialog answers with [`PairingAnswer`], or
+//! The bus side raises [`PairingRequested`], [`PairingDevice`],
+//! [`PairingUpdated`] and [`PairingCancelled`]. The dialog answers with [`PairingAnswer`], or
 //! [`PairingAbort`] to stop a pairing whose code is only being shown.
 
 use mecha_wayland::prelude::*;
@@ -88,6 +88,15 @@ pub struct PairingUpdated {
     pub entered: u16,
 }
 impl Signal for PairingUpdated {}
+
+/// The request's device was read: its name and icon, where the request
+/// raised had only its address.
+#[derive(Debug, Clone)]
+pub struct PairingDevice {
+    pub id: u64,
+    pub device: DeviceInfo,
+}
+impl Signal for PairingDevice {}
 
 /// bluetoothd cancelled the active request, or no longer needs its code
 /// shown.

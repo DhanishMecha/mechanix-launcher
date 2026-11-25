@@ -60,4 +60,19 @@ pub mod icons {
         pub const SLASH: &[u8] = include_bytes!("../icons/cellular/cell-signal-slash.svg");
         pub const X: &[u8] = include_bytes!("../icons/cellular/cell-signal-x.svg");
     }
+
+    /// Kinds of device, e.g. a Bluetooth device's.
+    pub mod devices {
+        pub const PHONE: &[u8] = include_bytes!("../icons/devices/device-mobile.svg");
+        pub const LAPTOP: &[u8] = include_bytes!("../icons/devices/laptop.svg");
+        pub const HEADPHONES: &[u8] = include_bytes!("../icons/devices/headphones.svg");
+        pub const SPEAKER: &[u8] = include_bytes!("../icons/devices/speaker-hifi.svg");
+        pub const KEYBOARD: &[u8] = include_bytes!("../icons/devices/keyboard.svg");
+        pub const MOUSE: &[u8] = include_bytes!("../icons/devices/mouse.svg");
+        pub const GAME_CONTROLLER: &[u8] = include_bytes!("../icons/devices/game-controller.svg");
+        pub const PEN: &[u8] = include_bytes!("../icons/devices/pen-nib.svg");
+        pub const DISPLAY: &[u8] = include_bytes!("../icons/devices/television.svg");
+        pub const CAMERA: &[u8] = include_bytes!("../icons/devices/camera.svg");
+        pub const PRINTER: &[u8] = include_bytes!("../icons/devices/printer.svg");
+    }
 }

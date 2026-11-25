@@ -26,6 +26,8 @@ pub(super) struct PairingDialog {
     pub(super) empty: bool,
     /// The active field's length, to tell an edit from anything else.
     pub(super) len: usize,
+    /// The avatar's sprite: the device's kind.
+    pub(super) avatar: SpriteId,
 }
 
 #[derive(Clone, Copy)]
@@ -35,6 +37,7 @@ pub(super) struct Parts {
     pub(super) cancel: Handle<Div>,
     pub(super) ok: Handle<Div>,
     pub(super) ok_icon: Handle<Icon>,
+    pub(super) avatar: Handle<Icon>,
     pub(super) name: Handle<Text>,
     pub(super) address: Handle<Text>,
     pub(super) message: Handle<Text>,
@@ -102,7 +105,7 @@ impl Widget for PairingDialog {
         let sheet = s.spawn(me, bottom_sheet().height(percent(100.0)));
         let (header, body) = style_sheet(s, sheet);
         let (cancel, title, ok, ok_icon) = build_header(s, header, icons);
-        let (name, address) = build_device(s, body, icons);
+        let (avatar, name, address) = build_device(s, body, icons);
         let message = s.spawn(
             body,
             text("")
@@ -119,6 +122,7 @@ impl Widget for PairingDialog {
             cancel,
             ok,
             ok_icon,
+            avatar,
             name,
             address,
             message,
@@ -134,6 +138,7 @@ impl Widget for PairingDialog {
             parts,
             empty: true,
             len: 0,
+            avatar: icons.bluetooth,
         }
     }
 }
@@ -220,8 +225,12 @@ fn build_header(
     (cancel, title, ok, ok_icon)
 }
 
-/// The Bluetooth avatar beside the device's name and address.
-fn build_device(s: Spawn, body: NodeId, icons: Icons) -> (Handle<Text>, Handle<Text>) {
+/// The device's avatar beside its name and address.
+fn build_device(
+    s: Spawn,
+    body: NodeId,
+    icons: Icons,
+) -> (Handle<Icon>, Handle<Text>, Handle<Text>) {
     let row = s.spawn(
         body,
         div().style(
@@ -243,7 +252,7 @@ fn build_device(s: Spawn, body: NodeId, icons: Icons) -> (Handle<Text>, Handle<T
             .background(s.color(ColorRole::SecondaryFixedDim))
             .radius(AVATAR / 2.0),
     );
-    s.spawn(
+    let avatar = s.spawn(
         avatar,
         icon(icons.bluetooth).color(s.color(ColorRole::Primary)),
     );
@@ -272,7 +281,7 @@ fn build_device(s: Spawn, body: NodeId, icons: Icons) -> (Handle<Text>, Handle<T
             .color(ColorRole::OnSurfaceVariant)
             .max_lines(1),
     );
-    (name, address)
+    (avatar, name, address)
 }
 
 /// The code, centred and large, and the keys typed of it.
@@ -491,16 +500,18 @@ fn display(shown: bool) -> Display {
 }
 
 fn sync(ctx: Ctx) {
-    let (kind, name, address, error) = {
+    let (kind, name, address, error, sprite) = {
         let dialog = ctx.resource::<Dialog>();
+        let icons = ctx.resource::<Icons>();
         match &dialog.shown {
             Some(r) => (
                 Some(r.kind.clone()),
                 r.device.name.clone(),
                 r.device.address.clone(),
                 dialog.error,
+                icons.device(r.device.icon.as_deref()),
             ),
-            None => (None, String::new(), String::new(), None),
+            None => (None, String::new(), String::new(), None, icons.bluetooth),
         }
     };
     let p = ctx.me().parts;
@@ -514,6 +525,12 @@ fn sync(ctx: Ctx) {
     }
     if let Some(mut t) = ctx.at(p.message) {
         t.set_text(kind.as_ref().map(prompt::message).unwrap_or_default());
+    }
+    if ctx.me().avatar != sprite {
+        ctx.me().avatar = sprite;
+        if let Some(mut i) = ctx.at(p.avatar) {
+            i.set_sprite(sprite);
+        }
     }
     // The address is the name until the device's is read.
     let same = name == address;

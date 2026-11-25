@@ -2,7 +2,7 @@ use dbus::Body;
 use dbus::fake::{FakeBus, UNIQUE};
 
 use super::*;
-use crate::bus::interface::AGENT_IFACE;
+use crate::bus::interface::{AGENT_IFACE, BLUEZ, DEVICE_IFACE};
 use crate::signals::MAX_PASSKEY;
 
 const BLUETOOTHD: &str = ":1.7";
@@ -19,6 +19,8 @@ enum Saw {
     Requested(Request),
     Updated(u64, u16),
     Cancelled(u64),
+    /// A device read: its name.
+    Device(u64, String),
 }
 
 fn agent() -> FakeBus {
@@ -38,6 +40,11 @@ fn agent() -> FakeBus {
         })
         .system(|app: &mut App, e: &PairingCancelled| {
             app.resource_mut::<Seen>().0.push(Saw::Cancelled(e.id));
+        })
+        .system(|app: &mut App, e: &PairingDevice| {
+            app.resource_mut::<Seen>()
+                .0
+                .push(Saw::Device(e.id, e.device.name.clone()));
         });
     set_bluetoothd(&mut bus.app, Some(BusName::new(BLUETOOTHD).unwrap()));
     bus.turn();
@@ -94,13 +101,76 @@ fn requested(bus: &mut FakeBus) -> Request {
     }
 }
 
+/// The `GetAll` the agent sent for `device`'s properties.
+fn expect_read(bus: &mut FakeBus, device: &str) -> Message {
+    let call = bus.expect_call("GetAll");
+    assert_eq!(call.destination().unwrap().as_str(), BLUEZ);
+    assert_eq!(call.path().unwrap().as_str(), device);
+    assert_eq!(call.body::<(String,)>().unwrap().0, DEVICE_IFACE);
+    call
+}
+
+fn named(alias: &str) -> PropMap {
+    PropMap::from([
+        ("Alias".to_owned(), Value::Str(alias.into())),
+        ("Icon".to_owned(), Value::Str("phone".into())),
+    ])
+}
+
 #[test]
-fn the_device_is_read_from_its_path() {
-    let info = device_info(path(PHONE));
-    assert_eq!(info.address, "AA:BB:CC:DD:EE:FF");
-    assert_eq!(info.name, "AA:BB:CC:DD:EE:FF");
-    assert_eq!(info.icon, None);
-    assert_eq!(device_info(path("/org/bluez")).address, "/org/bluez");
+fn a_request_reads_its_device_and_names_it() {
+    let mut bus = agent();
+    send(&mut bus, "RequestConfirmation", &(path(PHONE), 42u32));
+    let request = requested(&mut bus);
+    // Raised at once, with the address.
+    assert_eq!(request.device.name, "AA:BB:CC:DD:EE:FF");
+
+    let read = expect_read(&mut bus, PHONE);
+    bus.reply(&read, &(named("OnePlus 12"),));
+    bus.turn();
+    assert_eq!(
+        seen(&mut bus),
+        [Saw::Device(request.id, "OnePlus 12".into())]
+    );
+    let agent = bus.app.resource::<Agent>();
+    let kept = &agent.active.as_ref().unwrap().request.device;
+    assert_eq!(kept.name, "OnePlus 12");
+    assert_eq!(kept.icon.as_deref(), Some("phone"));
+}
+
+#[test]
+fn a_shown_code_reads_its_device_too() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    let read = expect_read(&mut bus, WATCH);
+    bus.reply(&read, &(named("Watch"),));
+    bus.turn();
+    assert_eq!(seen(&mut bus), [Saw::Device(id, "Watch".into())]);
+}
+
+#[test]
+fn a_failed_read_keeps_the_address() {
+    let mut bus = agent();
+    send(&mut bus, "RequestAuthorization", &(path(PHONE),));
+    requested(&mut bus);
+    let read = expect_read(&mut bus, PHONE);
+    bus.error(&read, "org.freedesktop.DBus.Error.UnknownObject", "gone");
+    bus.turn();
+    assert!(seen(&mut bus).is_empty());
+}
+
+#[test]
+fn a_read_after_the_request_ended_is_dropped() {
+    let mut bus = agent();
+    send(&mut bus, "RequestAuthorization", &(path(PHONE),));
+    requested(&mut bus);
+    let read = expect_read(&mut bus, PHONE);
+    send_empty(&mut bus, "Cancel");
+    seen(&mut bus);
+    bus.reply(&read, &(named("OnePlus 12"),));
+    bus.turn();
+    assert!(seen(&mut bus).is_empty());
 }
 
 #[test]

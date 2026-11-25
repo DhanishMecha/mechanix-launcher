@@ -1,7 +1,8 @@
 //! The pairing dialog: a bottom sheet for bluetoothd's requests.
 //!
 //! Shown on [`PairingRequested`], hidden on [`PairingCancelled`] or once
-//! answered. What it shows follows the request:
+//! answered. The device shows by its address and the Bluetooth icon
+//! until [`PairingDevice`] gives its name and kind. What it shows follows the request:
 //!
 //! - a PIN or passkey to enter: a field, sent with ✓ or Return;
 //! - a code to confirm, a pairing or a service to allow: ✓ accepts;
@@ -13,19 +14,19 @@
 //! The window is a top-layer `prompt` (mx_shell_surface_v1), spawned
 //! before the keyboard's, so the on-screen keyboard shows over it.
 //!
-//! Not yet: the device's name and icon (the address stands in), closing
-//! for the lock screen.
+//! Not yet: closing for the lock screen.
 
 use mecha_wayland::prelude::*;
 
 use crate::signals::{
-    PairingAbort, PairingAnswer, PairingCancelled, PairingRequested, PairingUpdated, Request,
-    RequestKind,
+    PairingAbort, PairingAnswer, PairingCancelled, PairingDevice, PairingRequested, PairingUpdated,
+    Request, RequestKind,
 };
 
 mod prompt;
 mod view;
 
+use prompt::DeviceKind;
 use view::{PairingDialog, PairingDialogBuilder};
 
 const NAMESPACE: &str = "bluetooth-agent";
@@ -44,8 +45,36 @@ struct Icons {
     confirm: SpriteId,
     warning: SpriteId,
     bluetooth: SpriteId,
+    /// By [`DeviceKind`], in [`DeviceKind::ALL`]'s order.
+    devices: [SpriteId; DeviceKind::ALL.len()],
 }
 impl Resource for Icons {}
+
+impl Icons {
+    /// The icon for bluetoothd's `Icon`; Bluetooth's for none, or one
+    /// without its own.
+    fn device(&self, icon: Option<&str>) -> SpriteId {
+        icon.and_then(prompt::device_kind)
+            .map_or(self.bluetooth, |kind| self.devices[kind as usize])
+    }
+}
+
+fn device_svg(kind: DeviceKind) -> &'static [u8] {
+    use assets::icons::devices::*;
+    match kind {
+        DeviceKind::Phone => PHONE,
+        DeviceKind::Laptop => LAPTOP,
+        DeviceKind::Headphones => HEADPHONES,
+        DeviceKind::Speaker => SPEAKER,
+        DeviceKind::Keyboard => KEYBOARD,
+        DeviceKind::Mouse => MOUSE,
+        DeviceKind::GameController => GAME_CONTROLLER,
+        DeviceKind::Pen => PEN,
+        DeviceKind::Display => DISPLAY,
+        DeviceKind::Camera => CAMERA,
+        DeviceKind::Printer => PRINTER,
+    }
+}
 
 struct Dialog {
     window: NodeId,
@@ -81,6 +110,7 @@ pub(crate) fn install(app: &mut App) {
             confirm: load(assets::icons::CHECK, HEADER_ICON as u32, "check"),
             warning: load(assets::icons::WARNING, ICON, "warning"),
             bluetooth: load(assets::icons::bluetooth::DEFAULT, ICON, "bluetooth"),
+            devices: DeviceKind::ALL.map(|kind| load(device_svg(kind), ICON, "device")),
         }
     };
     app.insert_resource(icons);
@@ -134,6 +164,18 @@ pub(crate) fn install(app: &mut App) {
             }
         };
         if moved {
+            refresh(app, false);
+        }
+    })
+    .system(|app, e: &PairingDevice| {
+        let named = {
+            let mut dialog = app.resource_mut::<Dialog>();
+            dialog
+                .shown(e.id)
+                .map(|r| r.device = e.device.clone())
+                .is_some()
+        };
+        if named {
             refresh(app, false);
         }
     })
