@@ -1,4 +1,5 @@
 use app_drawer::{AppDrawer, GEIST_MONO, GEIST_MONO_LIGHT};
+use bluetooth_agent::BluetoothAgentModule;
 use apps::RegistryModule;
 use control_center::app_screens::AppScreen;
 use control_center::{ControlCenterScreen, select_screen};
@@ -325,6 +326,9 @@ fn main() {
         .add_module(NotificationsModule)
         // Before the keyboard, so its keys show over the dialog.
         .add_module(PolkitAgentModule)
+        // No pairing dialog yet: requests wait until bluetoothd times
+        // them out.
+        .add_module(BluetoothAgentModule)
         .add_module(KeyboardModule { bottom_gap })
         .add_module(QuickSettingsModule)
         .add_module(PowerMenuModule)
