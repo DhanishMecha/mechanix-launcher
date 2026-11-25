@@ -11,9 +11,8 @@
 use mecha_wayland::prelude::*;
 
 use super::agent;
-use super::interface::AGENT_PATH;
+use super::interface::{AGENT_PATH, BLUEZ};
 
-const BLUEZ: &str = "org.bluez";
 const MANAGER_PATH: &str = "/org/bluez";
 const AGENT_MANAGER: &str = "org.bluez.AgentManager1";
 

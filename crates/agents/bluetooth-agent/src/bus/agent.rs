@@ -6,14 +6,19 @@
 //! calls are answered at once and kept apart, as the code shown; they
 //! never take the slot. Only the registered bluetoothd may call; others
 //! get `AccessDenied`. PINs and passkeys are never logged.
+//!
+//! Stopping a shown code ([`PairingAbort`]) calls the device's
+//! `CancelPairing`.
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
 
-use super::interface::{ACCESS_DENIED, AGENT_PATH, CANCELED, REJECTED, agent_spec};
+use super::interface::{
+    ACCESS_DENIED, AGENT_PATH, BLUEZ, CANCELED, DEVICE_IFACE, REJECTED, agent_spec,
+};
 use crate::signals::{
-    DeviceInfo, PairingAnswer, PairingCancelled, PairingRequested, PairingUpdated, Reply, Request,
-    RequestKind, valid_passkey, valid_pin,
+    DeviceInfo, PairingAbort, PairingAnswer, PairingCancelled, PairingRequested, PairingUpdated,
+    Reply, Request, RequestKind, valid_passkey, valid_pin,
 };
 
 /// A request, and its call, kept unanswered.
@@ -31,6 +36,8 @@ pub(crate) struct Agent {
     active: Option<PendingCall>,
     /// The PIN or passkey shown, already answered.
     shown: Option<Request>,
+    /// `CancelPairing` in flight, and the device it stops.
+    aborting: Option<(CallId, ObjectPath)>,
 }
 impl Resource for Agent {}
 
@@ -61,8 +68,13 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         next_id: 1,
         active: None,
         shown: None,
+        aborting: None,
     });
-    app.system(on_call).system(on_answer).system(on_disconnect);
+    app.system(on_call)
+        .system(on_answer)
+        .system(on_abort)
+        .system(on_abort_reply)
+        .system(on_disconnect);
     exported
 }
 
@@ -278,6 +290,48 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
     tracing::info!("bluetooth: {} accepted", call.member());
 }
 
+/// The user stopped the pairing whose code is shown: forget the code,
+/// and ask bluetoothd to stop pairing with the device.
+fn on_abort(app: &mut App, e: &PairingAbort) {
+    let (bus, path) = {
+        let mut agent = app.resource_mut::<Agent>();
+        if agent.shown.as_ref().is_none_or(|s| s.id != e.id) {
+            return;
+        }
+        let shown = agent.shown.take().expect("checked above");
+        (agent.bus, shown.device.path)
+    };
+    tracing::info!("bluetooth: stopping the pairing with {path}");
+    let call = {
+        let mut dbus = app.resource_mut::<DBus>();
+        let Some(mut b) = dbus.bus(bus) else {
+            tracing::error!("bluetooth: CancelPairing: the bus is not connected");
+            return;
+        };
+        b.send(MethodCall::new(
+            BLUEZ,
+            path.clone(),
+            DEVICE_IFACE,
+            "CancelPairing",
+        ))
+    };
+    app.resource_mut::<Agent>().aborting = Some((call, path));
+}
+
+fn on_abort_reply(app: &mut App, e: &MethodReply) {
+    let path = {
+        let mut agent = app.resource_mut::<Agent>();
+        match &agent.aborting {
+            Some((call, _)) if *call == e.call => agent.aborting.take().map(|(_, p)| p),
+            _ => return,
+        }
+    };
+    if let (Err(error), Some(path)) = (&e.result, path) {
+        // Often only that the pairing had ended already.
+        tracing::warn!("bluetooth: CancelPairing for {path} failed: {error:?}");
+    }
+}
+
 /// Names an answer without its PIN or passkey.
 fn reply_name(reply: &Reply) -> &'static str {
     match reply {
@@ -342,6 +396,7 @@ fn on_disconnect(app: &mut App, e: &BusDisconnected) {
             return;
         }
         agent.bluetoothd = None;
+        agent.aborting = None;
         (agent.active.take(), agent.shown.take())
     };
     for id in [active.map(|k| k.request.id), shown.map(|s| s.id)]

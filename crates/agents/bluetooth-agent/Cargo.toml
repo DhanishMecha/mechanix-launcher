@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+assets.workspace = true
 mecha-wayland.workspace = true
 tracing = "0.1"
 

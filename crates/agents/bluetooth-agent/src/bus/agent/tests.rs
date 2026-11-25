@@ -382,3 +382,39 @@ fn a_wrong_signature_never_reaches_the_agent() {
     );
     assert!(seen(&mut bus).is_empty());
 }
+
+#[test]
+fn stopping_a_shown_code_cancels_the_pairing() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    bus.received();
+
+    bus.app.signal(PairingAbort { id });
+    bus.turn();
+    let call = bus.expect_call("CancelPairing");
+    assert_eq!(call.destination().unwrap().as_str(), BLUEZ);
+    assert_eq!(call.path().unwrap().as_str(), WATCH);
+    assert_eq!(call.interface().unwrap().as_str(), DEVICE_IFACE);
+
+    // The code is gone: bluetoothd's Cancel after it closes nothing.
+    send_empty(&mut bus, "Cancel");
+    assert!(seen(&mut bus).is_empty());
+
+    bus.error(&call, "org.bluez.Error.DoesNotExist", "No such pairing");
+    bus.turn();
+    assert_eq!(bus.app.resource::<Agent>().aborting, None);
+}
+
+#[test]
+fn stopping_another_code_does_nothing() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    bus.received();
+
+    bus.app.signal(PairingAbort { id: id + 1 });
+    bus.turn();
+    assert!(bus.received().is_empty());
+    assert!(bus.app.resource::<Agent>().shown.is_some());
+}

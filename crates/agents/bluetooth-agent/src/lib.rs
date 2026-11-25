@@ -5,9 +5,11 @@
 //! the whole agent:
 //!
 //! - `signals`: what the parts below say to each other;
-//! - `bus`: the exported agent, and its registration with bluetoothd.
+//! - `bus`: the exported agent, and its registration with bluetoothd;
+//! - `dialog`: the pairing sheet.
 
 mod bus;
+mod dialog;
 mod signals;
 
 use mecha_wayland::prelude::*;
@@ -19,8 +21,10 @@ pub use signals::{
     valid_pin,
 };
 
-/// The Bluetooth pairing agent. Installs after `DBusModule` with the
-/// system bus.
+/// The Bluetooth pairing agent. Installs after `RingModule`,
+/// `DBusModule` with the system bus, the window and presentation
+/// modules, the theme, the `Atlas` and the `FontBook`; and before the
+/// `KeyboardModule`, so the on-screen keyboard shows over the dialog.
 pub struct BluetoothAgentModule;
 
 impl Module for BluetoothAgentModule {
@@ -28,6 +32,7 @@ impl Module for BluetoothAgentModule {
         if !bus::agent::install(app, BusId::System) {
             return;
         }
+        dialog::install(app);
         bus::register::install(app, BusId::System);
     }
 }

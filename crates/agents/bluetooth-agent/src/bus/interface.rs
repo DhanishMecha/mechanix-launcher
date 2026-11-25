@@ -3,6 +3,10 @@
 
 use mecha_wayland::prelude::*;
 
+pub(crate) const BLUEZ: &str = "org.bluez";
+/// A remote device's interface, for `CancelPairing`.
+pub(crate) const DEVICE_IFACE: &str = "org.bluez.Device1";
+
 /// Where the agent is exported.
 pub const AGENT_PATH: &str = "/org/mechanix/bluez/Agent";
 pub(crate) const AGENT_IFACE: &str = "org.bluez.Agent1";
