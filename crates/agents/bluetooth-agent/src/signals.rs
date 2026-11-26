@@ -45,8 +45,8 @@ pub enum RequestKind {
 }
 
 impl RequestKind {
-    /// Only shown: bluetoothd took its reply already, and ends it with
-    /// `Cancel`.
+    /// Only shown: bluetoothd took its reply already. It ends with
+    /// `Cancel`, or with the device paired.
     pub fn is_display(&self) -> bool {
         matches!(
             self,
@@ -99,7 +99,7 @@ pub struct PairingDevice {
 impl Signal for PairingDevice {}
 
 /// bluetoothd cancelled the active request, or no longer needs its code
-/// shown.
+/// shown: it cancelled, or the device is paired.
 #[derive(Debug, Clone)]
 pub struct PairingCancelled {
     pub id: u64,

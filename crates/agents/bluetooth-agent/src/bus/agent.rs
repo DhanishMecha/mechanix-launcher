@@ -8,7 +8,9 @@
 //! get `AccessDenied`. PINs and passkeys are never logged.
 //!
 //! Stopping a shown code ([`PairingAbort`]) calls the device's
-//! `CancelPairing`.
+//! `CancelPairing`. bluetoothd sends no `Cancel` once a shown code did its
+//! job, so the device's `Paired` is watched while it shows: turning true,
+//! the code is done.
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
@@ -40,6 +42,8 @@ pub(crate) struct Agent {
     shown: Option<Request>,
     /// `CancelPairing` in flight, and the device it stops.
     aborting: Option<(CallId, ObjectPath)>,
+    /// The watch on the shown code's device, for its `Paired`.
+    paired: Option<MatchId>,
 }
 impl Resource for Agent {}
 
@@ -71,11 +75,13 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         active: None,
         shown: None,
         aborting: None,
+        paired: None,
     });
     app.system(on_call)
         .system(on_answer)
         .system(on_abort)
         .system(on_abort_reply)
+        .system(on_paired)
         .system(on_disconnect);
     device::install(app, bus);
     exported
@@ -228,8 +234,59 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
         kind,
     };
     app.resource_mut::<Agent>().shown = Some(request.clone());
+    watch_paired(app, &path);
     app.signal(PairingRequested(request));
     device::read(app, id, &path);
+}
+
+/// Follow `path`'s `Paired`, in place of the device watched before.
+fn watch_paired(app: &mut App, path: &ObjectPath) {
+    unwatch_paired(app);
+    let bus = app.resource::<Agent>().bus;
+    let watch = {
+        let mut dbus = app.resource_mut::<DBus>();
+        dbus.bus(bus)
+            .map(|mut b| b.watch_properties(BLUEZ, path.clone(), DEVICE_IFACE))
+    };
+    app.resource_mut::<Agent>().paired = watch;
+}
+
+fn unwatch_paired(app: &mut App) {
+    let (bus, watch) = {
+        let mut agent = app.resource_mut::<Agent>();
+        (agent.bus, agent.paired.take())
+    };
+    if let Some(watch) = watch
+        && let Some(mut b) = app.resource_mut::<DBus>().bus(bus)
+    {
+        b.remove_match(watch);
+    }
+}
+
+/// The shown code's device is paired: the code did its job, close it.
+fn on_paired(app: &mut App, e: &SignalReceived) {
+    let Some(watch) = app.resource::<Agent>().paired else {
+        return;
+    };
+    if !e.matches.contains(&watch) {
+        return;
+    }
+    let paired = match PropertiesChanged::parse(&e.msg) {
+        Ok((_, changed, _)) => matches!(changed.get_as::<bool>("Paired"), Some(Ok(true))),
+        Err(error) => {
+            tracing::warn!("bluetooth: the device's PropertiesChanged: {error:?}");
+            return;
+        }
+    };
+    if !paired {
+        return;
+    }
+    let shown = app.resource_mut::<Agent>().shown.take();
+    unwatch_paired(app);
+    if let Some(shown) = shown {
+        tracing::info!("bluetooth: {} is paired", shown.device.path);
+        app.signal(PairingCancelled { id: shown.id });
+    }
 }
 
 fn next_id(app: &mut App) -> u64 {
@@ -311,6 +368,7 @@ fn on_abort(app: &mut App, e: &PairingAbort) {
         let shown = agent.shown.take().expect("checked above");
         (agent.bus, shown.device.path)
     };
+    unwatch_paired(app);
     tracing::info!("bluetooth: stopping the pairing with {path}");
     let call = {
         let mut dbus = app.resource_mut::<DBus>();
@@ -367,6 +425,7 @@ fn drop_all(app: &mut App) {
         let mut agent = app.resource_mut::<Agent>();
         (agent.active.take(), agent.shown.take())
     };
+    unwatch_paired(app);
     if let Some(kept) = active {
         app.resource_mut::<DBus>()
             .reply_error(&kept.call, CANCELED, "Canceled");
@@ -407,6 +466,8 @@ fn on_disconnect(app: &mut App, e: &BusDisconnected) {
         }
         agent.bluetoothd = None;
         agent.aborting = None;
+        // Its matches went with the bus.
+        agent.paired = None;
         (agent.active.take(), agent.shown.take())
     };
     for id in [active.map(|k| k.request.id), shown.map(|s| s.id)]

@@ -488,3 +488,103 @@ fn stopping_another_code_does_nothing() {
     assert!(bus.received().is_empty());
     assert!(bus.app.resource::<Agent>().shown.is_some());
 }
+
+/// `PropertiesChanged` for `device`'s `Device1`, as the agent's watch
+/// hears it.
+fn device_changed(bus: &mut FakeBus, device: &'static str, props: PropMap) {
+    let watch = bus.app.resource::<Agent>().paired.expect("a watch");
+    bus.app.signal(SignalReceived {
+        bus: BusId::Session,
+        matches: [watch].into_iter().collect(),
+        msg: Message::signal(
+            path(device),
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .with_body(&(DEVICE_IFACE, props, Vec::<String>::new())),
+    });
+    bus.turn();
+}
+
+fn paired(value: bool) -> PropMap {
+    PropMap::from([("Paired".into(), Value::Bool(value))])
+}
+
+/// bluetoothd sends no `Cancel` after a shown code: the device turning
+/// paired closes it.
+#[test]
+fn a_shown_code_closes_once_the_device_is_paired() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+    let id = requested(&mut bus).id;
+    seen(&mut bus);
+
+    device_changed(&mut bus, PHONE, paired(true));
+    assert_eq!(seen(&mut bus), vec![Saw::Cancelled(id)]);
+    let agent = bus.app.resource::<Agent>();
+    assert!(agent.shown.is_none());
+    assert!(agent.paired.is_none());
+}
+
+#[test]
+fn other_changes_leave_the_code_shown() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    requested(&mut bus);
+    seen(&mut bus);
+
+    device_changed(&mut bus, WATCH, paired(false));
+    device_changed(
+        &mut bus,
+        WATCH,
+        PropMap::from([("Connected".into(), Value::Bool(true))]),
+    );
+    assert!(seen(&mut bus).is_empty());
+    assert!(bus.app.resource::<Agent>().shown.is_some());
+}
+
+#[test]
+fn a_signal_for_another_watch_is_ignored() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+    requested(&mut bus);
+    seen(&mut bus);
+
+    let other = bus
+        .app
+        .resource_mut::<DBus>()
+        .bus(BusId::Session)
+        .unwrap()
+        .watch_properties(BLUEZ, path(WATCH), DEVICE_IFACE);
+    bus.app.signal(SignalReceived {
+        bus: BusId::Session,
+        matches: [other].into_iter().collect(),
+        msg: Message::signal(
+            path(WATCH),
+            "org.freedesktop.DBus.Properties",
+            "PropertiesChanged",
+        )
+        .with_body(&(DEVICE_IFACE, paired(true), Vec::<String>::new())),
+    });
+    bus.turn();
+    assert!(seen(&mut bus).is_empty());
+    assert!(bus.app.resource::<Agent>().shown.is_some());
+}
+
+/// However the code ends, its device is no longer watched.
+#[test]
+fn the_watch_ends_with_the_code() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    assert!(bus.app.resource::<Agent>().paired.is_some());
+    bus.app.signal(PairingAbort { id });
+    bus.turn();
+    assert!(bus.app.resource::<Agent>().paired.is_none());
+
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    requested(&mut bus);
+    assert!(bus.app.resource::<Agent>().paired.is_some());
+    send_empty(&mut bus, "Cancel");
+    assert!(bus.app.resource::<Agent>().paired.is_none());
+}
