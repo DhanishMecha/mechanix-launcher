@@ -3,26 +3,27 @@
 
 mod drawer;
 mod launch;
+mod placeholder;
 mod rank;
 mod row;
 mod search_bar;
 
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use mecha_wayland::prelude::*;
 use screen::Screen;
 
-use apps::{DesktopApp, IconDirs};
+use apps::{DesktopApp, IconDirs, LaunchId};
 use drawer::DrawerBuilder;
 
 /// The drawer's two faces, Regular and Light Geist Mono, for the host's
 /// `FontBook`.
 pub use assets::fonts::{GEIST_MONO, GEIST_MONO_LIGHT};
+pub use placeholder::LaunchPlaceholder;
 
-/// Starts an app.
-type Launcher = Rc<dyn Fn(&mut App, &DesktopApp)>;
+/// Starts an app, for its launch.
+type Launcher = Rc<dyn Fn(&mut App, &DesktopApp, LaunchId)>;
 
 /// Brings a running app's window to the front.
 type Activator = Rc<dyn Fn(&mut App, ToplevelId)>;
@@ -34,7 +35,6 @@ pub struct AppDrawer {
     icon_dirs: Rc<IconDirs>,
     launcher: Launcher,
     activator: Activator,
-    at_top: Rc<Cell<bool>>,
 }
 
 impl AppDrawer {
@@ -59,12 +59,14 @@ impl AppDrawer {
             icon_dirs: Rc::new(icon_dirs),
             launcher: Rc::new(launch::start),
             activator: Rc::new(drawer::activate_toplevel),
-            at_top: Rc::new(Cell::new(true)),
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn launcher(mut self, f: impl Fn(&mut App, &DesktopApp) + 'static) -> AppDrawer {
+    pub(crate) fn launcher(
+        mut self,
+        f: impl Fn(&mut App, &DesktopApp, LaunchId) + 'static,
+    ) -> AppDrawer {
         self.launcher = Rc::new(f);
         self
     }
@@ -73,11 +75,6 @@ impl AppDrawer {
     pub(crate) fn activator(mut self, f: impl Fn(&mut App, ToplevelId) + 'static) -> AppDrawer {
         self.activator = Rc::new(f);
         self
-    }
-
-    /// Whether the list rests at its top: the gate for the nav's close swipe.
-    pub fn at_top(&self) -> Rc<Cell<bool>> {
-        self.at_top.clone()
     }
 }
 
@@ -95,7 +92,6 @@ impl Screen for AppDrawer {
             DrawerBuilder {
                 data_dirs: self.data_dirs.clone(),
                 icon_dirs: self.icon_dirs.clone(),
-                at_top: self.at_top.clone(),
             },
         )
         .id()

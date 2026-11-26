@@ -2,20 +2,26 @@
 //! to the view/latch controllers; every other action is a keystroke emitted
 //! through the input method (preferred) or the virtual keyboard (fallback),
 //! consuming any latched modifier. Control keys ([`repeats`]) are held down
-//! for as long as the finger is, so the client's key repeat runs. Each
+//! for as long as the finger is, so the client's key repeat runs, as are the
+//! pointing stick's arrows ([`hold_direction`], Shift+arrow in select mode);
+//! a glide taps arrows instead ([`tap_direction`]).
+//! Using any key but the pointing stick ends its select mode. Each
 //! keystroke also updates the [`TypingContext`], handing finished words to the
 //! active profile's recorder.
 
 use mecha_wayland::prelude::*;
 use xkbcommon::xkb::Keysym;
 
+use crate::complete::Completion;
 use crate::field::Field;
 use crate::layout::{KeyAction, Modifier};
 use crate::modifiers::latch::{LatchedState, consume_latch, toggle_latch};
+use crate::modifiers::pointing_stick::{self, PointingStickMode};
 use crate::modifiers::shift::{self, Shift, ShiftState};
 use crate::predict::{Prediction, TypingContext};
 use crate::protocol::input_method::{self, InputMethodState};
 use crate::protocol::virtual_keyboard::{self, VirtualKeyboardState};
+use crate::touch::pointing_stick::Direction;
 use crate::view::{switch_view, view_for};
 use crate::widget::keyboard::Keyboard;
 
@@ -23,6 +29,10 @@ use crate::widget::keyboard::Keyboard;
 /// Keyboard widget state; every other action is a keystroke the virtual
 /// keyboard emits (consuming any latched modifier).
 pub(crate) fn dispatch(ctx: &mut Context<'_, Keyboard>, action: &KeyAction, time: u32) {
+    // Using any other key ends the pointing stick's select mode.
+    if !matches!(action, KeyAction::PointingStick) {
+        pointing_stick::reset(ctx);
+    }
     match action {
         KeyAction::SetView(name) => {
             switch_view(ctx, name);
@@ -89,6 +99,7 @@ pub(crate) fn dispatch(ctx: &mut Context<'_, Keyboard>, action: &KeyAction, time
             }
         }
         KeyAction::Shift => shift::released(ctx, time),
+        KeyAction::PointingStick => pointing_stick::toggle(ctx),
         KeyAction::Unhandled(name) => {
             tracing::info!(action = %name, "tapped key with no wired action");
         }
@@ -182,9 +193,54 @@ pub(crate) fn repeats(action: &KeyAction) -> bool {
 
 /// Press a [`repeats`] key's keysym through the virtual keyboard and leave it
 /// down until [`release`], consuming any latched modifier. The latch is
-/// cleared now but its mask stays applied until the key is released.
-pub(crate) fn hold(ctx: &mut Context<'_, Keyboard>, ks: Keysym) {
-    let latched_mask = latched_mask(ctx);
+/// cleared now but its mask stays applied until the key is released. Like
+/// any other key used, it ends the pointing stick's select mode. A
+/// BackSpace right after a suggestion was accepted undoes that instead and
+/// presses nothing. Returns whether the key was pressed.
+pub(crate) fn hold(ctx: &mut Context<'_, Keyboard>, ks: Keysym) -> bool {
+    pointing_stick::reset(ctx);
+    if ks == Keysym::BackSpace && undo_suggestion(ctx) {
+        return false;
+    }
+    press_and_hold(ctx, ks, 0);
+    true
+}
+
+/// Press the arrow `ks` for the pointing stick's held direction and leave it
+/// down until [`release`], as [`hold`] does, with Shift held too in select
+/// mode. The mode is kept.
+pub(crate) fn hold_direction(ctx: &mut Context<'_, Keyboard>, ks: Keysym) {
+    let shift = if ctx.resource::<PointingStickMode>().select() {
+        ctx.resource::<VirtualKeyboardState>().shift_mask
+    } else {
+        0
+    };
+    press_and_hold(ctx, ks, shift);
+}
+
+/// Tap the arrow for `d` `count` times, as a glide's caret steps: with
+/// Shift in the pointing stick's select mode, which is kept, and without
+/// latched modifiers (left for the next key). The caret may have moved
+/// (see [`TypingContext::caret_key`]).
+pub(crate) fn tap_direction(ctx: &mut Context<'_, Keyboard>, d: Direction, count: u32) {
+    let shift = if ctx.resource::<PointingStickMode>().select() {
+        ctx.resource::<VirtualKeyboardState>().shift_mask
+    } else {
+        0
+    };
+    {
+        let (mut vk, mut wl) = ctx.fetch::<(ResMut<VirtualKeyboardState>, ResMut<Wayland>)>();
+        for _ in 0..count {
+            virtual_keyboard::emit_keysym(&mut vk, &mut wl, d.keysym(), shift);
+        }
+    }
+    note_control(ctx, d.keysym());
+}
+
+/// Press `ks` with `extra_mask` and any latched modifiers, leaving it down,
+/// then spend the latch and note the keystroke.
+fn press_and_hold(ctx: &mut Context<'_, Keyboard>, ks: Keysym, extra_mask: u32) {
+    let latched_mask = latched_mask(ctx) | extra_mask;
     {
         let (mut vk, mut wl) = ctx.fetch::<(ResMut<VirtualKeyboardState>, ResMut<Wayland>)>();
         virtual_keyboard::press_keysym(&mut vk, &mut wl, ks, latched_mask);
@@ -197,6 +253,64 @@ pub(crate) fn hold(ctx: &mut Context<'_, Keyboard>, ks: Keysym) {
 pub(crate) fn release(ctx: &mut Context<'_, Keyboard>) {
     let (mut vk, mut wl) = ctx.fetch::<(ResMut<VirtualKeyboardState>, ResMut<Wayland>)>();
     virtual_keyboard::release_held(&mut vk, &mut wl);
+}
+
+/// Accept suggestion `index` of the bar: replace the word around the cursor
+/// with it in one input-method commit. The bar only shows while the input
+/// method is active, so there is no virtual-keyboard fallback; if it went
+/// inactive meanwhile, nothing is typed. Like any key, it ends the pointing
+/// stick's select mode and spends a one-shot shift.
+pub(crate) fn accept_suggestion(ctx: &mut Context<'_, Keyboard>, index: usize) {
+    pointing_stick::reset(ctx);
+    // While the caret settles the bar shows the last word's suggestions,
+    // whose edits no longer fit: a tap then does nothing.
+    let Some(suggestion) = ctx.resource::<Completion>().get(index).cloned() else {
+        return;
+    };
+    let sent = {
+        let (st, mut wl) = ctx.fetch::<(Res<InputMethodState>, ResMut<Wayland>)>();
+        input_method::apply_edit(st, &mut wl, &suggestion.edit)
+    };
+    if !sent {
+        tracing::warn!("suggestion tapped with no active input method; ignored");
+        return;
+    }
+    // No haptic here: the touch gave one when it landed on the suggestion,
+    // as a key's press does.
+    tracing::info!(word = %suggestion.label, kind = ?suggestion.kind, "accepted suggestion");
+    let (words, original, rev) = {
+        let mut typing = ctx.resource_mut::<TypingContext>();
+        let original = format!("{}{}", typing.prefix(), typing.word_after());
+        let words = typing.replaced_word(&suggestion.edit.insert);
+        (words, original, typing.local_rev())
+    };
+    ctx.resource_mut::<Completion>()
+        .remember_undo(original, suggestion.edit.insert.clone(), rev);
+    record(ctx, words);
+    shift::typed_letter(ctx);
+}
+
+/// Take back the last accepted suggestion, if a backspace now may (see
+/// [`Completion::take_undo`]): the suggestion's text is replaced by the word
+/// as it was typed, the caret after it. Returns whether it did.
+fn undo_suggestion(ctx: &mut Context<'_, Keyboard>) -> bool {
+    let Some(undo) = ({
+        let (mut completion, typing) = ctx.fetch::<(ResMut<Completion>, Res<TypingContext>)>();
+        completion.take_undo(typing, std::time::Instant::now())
+    }) else {
+        return false;
+    };
+    let sent = {
+        let (st, mut wl) = ctx.fetch::<(Res<InputMethodState>, ResMut<Wayland>)>();
+        input_method::apply_edit(st, &mut wl, &undo.edit())
+    };
+    if !sent {
+        return false;
+    }
+    tracing::info!(word = %undo.original, "undid suggestion");
+    ctx.resource_mut::<TypingContext>()
+        .replaced_word(&undo.original);
+    true
 }
 
 /// Finish the word being typed, handing it to the recorder.
@@ -213,25 +327,27 @@ fn note_text(ctx: &mut Context<'_, Keyboard>, text: &str) {
 
 /// A non-printable keysym was sent (tapped, or the start of a hold): BackSpace
 /// deletes one character, Return and Tab finish the word, anything else (an
-/// arrow, Delete, Home, ...) moves the cursor somewhere unknown, so the word
-/// is dropped.
+/// arrow, Delete, Home, ...) may move the cursor (see
+/// [`TypingContext::caret_key`]).
 fn note_control(ctx: &mut Context<'_, Keyboard>, ks: Keysym) {
     match ks {
         Keysym::BackSpace => ctx.resource_mut::<TypingContext>().backspace(),
         Keysym::Return | Keysym::Tab => end_word(ctx),
-        _ => ctx.resource_mut::<TypingContext>().clear(),
+        _ => ctx.resource_mut::<TypingContext>().caret_key(),
     }
 }
 
-/// Hand finished words to the recorder, if the focused field's profile allows.
+/// Hand finished words to the recorder and the completion source, if the
+/// focused field's profile allows.
 fn record(ctx: &mut Context<'_, Keyboard>, words: impl IntoIterator<Item = String>) {
     let field = Field::current(ctx);
-    let mut prediction = ctx.resource_mut::<Prediction>();
+    let (mut prediction, mut completion) = ctx.fetch::<(ResMut<Prediction>, ResMut<Completion>)>();
     if !prediction.active(field).0.may_record {
         return;
     }
     for word in words {
         prediction.recorder.record(&word);
+        completion.learn(&word);
     }
 }
 

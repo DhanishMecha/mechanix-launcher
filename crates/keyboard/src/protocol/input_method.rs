@@ -11,9 +11,9 @@
 
 use mecha_wayland::prelude::*;
 
+use crate::complete::TextEdit;
 use crate::predict::TypingContext;
 use crate::visibility::KeyboardVisibilityExt;
-use crate::zone::ExclusiveZone;
 
 /// The text-input context the compositor reports for the focused field.
 ///
@@ -90,6 +90,27 @@ pub(crate) fn commit_text(state: &InputMethodState, wl: &mut Wayland, text: &str
     let serial = state.serial;
     im.commit_string(&mut *wl, text);
     im.commit(&mut *wl, serial);
+    true
+}
+
+/// Apply `edit` through `zwp_input_method_v2` as one atomic change: a
+/// `delete_surrounding_text` (when it deletes anything), a `commit_string`
+/// and `commit(serial)`, which the client applies together. Returns `true`
+/// if sent (IM bound and active).
+pub(crate) fn apply_edit(state: &InputMethodState, wl: &mut Wayland, edit: &TextEdit) -> bool {
+    if !state.should_commit() {
+        return false;
+    }
+    let Some(im) = state.input_method else {
+        return false;
+    };
+    if edit.delete_before > 0 || edit.delete_after > 0 {
+        im.delete_surrounding_text(&mut *wl, edit.delete_before, edit.delete_after);
+    }
+    if !edit.insert.is_empty() {
+        im.commit_string(&mut *wl, &edit.insert);
+    }
+    im.commit(&mut *wl, state.serial);
     true
 }
 
@@ -196,23 +217,33 @@ fn on_input_method_event(app: &mut App, event: &ZwpInputMethodV2Event) {
                 let activated = std::mem::take(&mut st.pending_activate);
                 surrounding = st.pending_surrounding.take();
                 let prev = std::mem::replace(&mut st.current, next);
+                let changed = prev.purpose != st.current.purpose || prev.hint != st.current.hint;
+                // An activate while already active, for the same kind of
+                // field, is the focused field tapped again: clients (GTK,
+                // mecha-wayland's own fields) re-enable text input on every
+                // tap in it. That is no new field; the surrounding text it
+                // comes with says where the caret now is.
+                let reactivated = activated && prev.active && !changed;
+                let new_field = activated && !reactivated;
                 // A new field (activate, or a purpose or hint change) or none
                 // at all (deactivate): the word being tracked no longer
-                // applies.
-                reset_context = activated
+                // applies. Nor after a re-tap that did not say where the
+                // caret went.
+                reset_context = new_field
                     || (prev.active && !st.current.active)
-                    || prev.purpose != st.current.purpose
-                    || prev.hint != st.current.hint;
+                    || changed
+                    || (reactivated && surrounding.is_none());
                 st.serial = st.serial.wrapping_add(1);
                 let now = &st.current;
-                tracing::info!(
+                // Debug, not info: the client sends one per caret move,
+                // dozens a second while gliding.
+                tracing::debug!(
                     active = now.active,
                     serial = st.serial,
                     "input-method: state applied"
                 );
 
-                let changed = prev.purpose != now.purpose || prev.hint != now.hint;
-                if now.active && (activated || !prev.active || changed) {
+                if now.active && (new_field || !prev.active || changed) {
                     focused = Some(TextInputFocused {
                         purpose: now.purpose,
                         hint: now.hint,
@@ -221,7 +252,8 @@ fn on_input_method_event(app: &mut App, event: &ZwpInputMethodV2Event) {
                 // Only an activate/deactivate moves the surface, so other
                 // `done`s (e.g. surrounding-text updates) don't undo a manual
                 // show or hide. An activate shows it even when already
-                // active: the field was tapped again.
+                // active: the field was tapped again, maybe to bring back a
+                // keyboard the user hid.
                 if now.active && activated {
                     Some(true)
                 } else {
@@ -244,26 +276,12 @@ fn on_input_method_event(app: &mut App, event: &ZwpInputMethodV2Event) {
             ctx.set_surrounding(&text, cursor);
         }
     }
-    // Under the host's own screens, an activation shows the keyboard only
-    // for the host's field: an app beneath that gets keyboard focus back
-    // re-enables its text input too, and must not bring the keyboard up.
-    if apply_visible == Some(true) && !may_show(app) {
-        return;
-    }
     if let Some(focused) = focused {
         app.signal(focused);
     }
     if let Some(visible) = apply_visible {
         app.set_keyboard_visibility(visible);
     }
-}
-
-/// Whether an activation may show the keyboard: always over apps; while
-/// [`suspend_keyboard_zone`](crate::suspend_keyboard_zone) holds (the host's
-/// screens cover the apps), only when the host's own text field has focus.
-fn may_show(app: &App) -> bool {
-    let covered = app.has_resource::<ExclusiveZone>() && app.resource::<ExclusiveZone>().suspended;
-    !covered || (app.has_resource::<TextInput>() && app.resource::<TextInput>().focused().is_some())
 }
 
 #[cfg(test)]
@@ -331,21 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn an_app_under_the_hosts_screens_cannot_bring_it_up() {
-        let mut app = app();
-        app.insert_resource(ExclusiveZone {
-            suspended: true,
-            ..Default::default()
-        });
-        send(&mut app, &[activate, done]);
-        assert!(!app.keyboard_visible());
-
-        app.resource_mut::<ExclusiveZone>().suspended = false;
-        send(&mut app, &[activate, done]);
-        assert!(app.keyboard_visible());
-    }
-
-    #[test]
     fn a_done_without_activate_keeps_a_manual_hide() {
         let mut app = app();
         send(&mut app, &[activate, done]);
@@ -368,12 +371,48 @@ mod tests {
         assert_eq!(app.resource::<TypingContext>().prefix(), "");
     }
 
+    fn other_surrounding(input_method: ZwpInputMethodV2) -> ZwpInputMethodV2Event {
+        ZwpInputMethodV2Event::SurroundingText {
+            input_method,
+            text: "hi there".into(),
+            cursor: 5,
+            anchor: 5,
+        }
+    }
+
     #[test]
-    fn activate_resets_context() {
+    fn a_retap_without_surrounding_text_drops_the_word() {
         let mut app = app();
         send(&mut app, &[activate, surrounding, done]);
         send(&mut app, &[activate, done]);
         assert_eq!(app.resource::<TypingContext>().prefix(), "");
+    }
+
+    #[test]
+    fn a_retap_takes_the_word_under_the_new_caret() {
+        let mut app = app();
+        send(&mut app, &[activate, surrounding, done]);
+        let local = app.resource::<TypingContext>().local_rev();
+        send(&mut app, &[activate, other_surrounding, done]);
+        let ctx = app.resource::<TypingContext>();
+        assert_eq!((ctx.prefix().as_str(), ctx.word_after()), ("th", "ere"));
+        // Not a reset of ours: an undo still checks the text itself.
+        assert_eq!(ctx.local_rev(), local);
+    }
+
+    #[test]
+    fn a_retap_is_not_a_newly_focused_field() {
+        let mut app = app();
+        app.insert_resource(Focused::default());
+        app.system(record_focus);
+        send(&mut app, &[activate, surrounding, done]);
+        send(&mut app, &[activate, surrounding, done]);
+        app.flush();
+        assert_eq!(app.resource::<Focused>().0.len(), 1);
+        // A different kind of field is.
+        send(&mut app, &[activate, content_type, done]);
+        app.flush();
+        assert_eq!(app.resource::<Focused>().0.len(), 2);
     }
 
     #[test]

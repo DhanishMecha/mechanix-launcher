@@ -4,5 +4,7 @@
 pub(crate) mod key;
 pub(crate) mod keyboard;
 pub(crate) mod more_keys;
+pub(crate) mod pointing_stick;
 pub(crate) mod popup;
+pub(crate) mod suggestion_bar;
 pub(crate) mod surface;
