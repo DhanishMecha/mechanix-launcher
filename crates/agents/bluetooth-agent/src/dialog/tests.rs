@@ -178,7 +178,7 @@ fn a_service_is_named() {
     assert_eq!(text_of(&app, p.title), "Bluetooth connection");
     assert_eq!(
         text_of(&app, p.message),
-        "This device wants to connect for audio."
+        "This device wants to use Audio Sink."
     );
     assert!(!shown(&app, p.code_box));
 }

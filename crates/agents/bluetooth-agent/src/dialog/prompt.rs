@@ -2,6 +2,10 @@
 
 use crate::signals::{RequestKind, format_passkey, valid_passkey, valid_pin};
 
+mod services;
+
+use services::service_name;
+
 pub(super) const PIN_ERROR: &str = "Enter 1 to 16 letters or digits";
 pub(super) const PASSKEY_ERROR: &str = "Enter up to 6 digits";
 
@@ -37,7 +41,7 @@ pub(super) fn message(kind: &RequestKind) -> String {
         RequestKind::Confirmation(_) => "Pair if the device shows the same code.".into(),
         RequestKind::Authorization => "This device wants to pair.".into(),
         RequestKind::Service(uuid) => match service_name(uuid) {
-            Some(what) => format!("This device wants to connect for {what}."),
+            Some(name) => format!("This device wants to use {name}."),
             None => format!("This device wants to use service {uuid}."),
         },
         RequestKind::DisplayPinCode(_) => "Enter this PIN on the device.".into(),
@@ -146,44 +150,12 @@ pub(super) fn device_kind(icon: &str) -> Option<DeviceKind> {
     })
 }
 
-/// What a service is for, in a few words, by its UUID.
-pub(super) fn service_name(uuid: &str) -> Option<&'static str> {
-    let uuid = uuid.to_ascii_lowercase();
-    let short = uuid
-        .strip_prefix("0000")
-        .and_then(|rest| rest.strip_suffix("-0000-1000-8000-00805f9b34fb"))?;
-    Some(match short {
-        "1101" => "a serial port",
-        "1105" | "1106" => "file transfer",
-        "1108" | "1112" => "headset audio",
-        "110a" | "110b" | "110d" => "audio",
-        "110c" | "110e" | "110f" => "media controls",
-        "1115" | "1116" | "1117" => "networking",
-        "111e" | "111f" => "phone calls",
-        "1124" | "1812" => "input",
-        "112d" => "SIM access",
-        "112f" | "1130" => "contacts",
-        "1132" | "1133" | "1134" => "messages",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn services_are_named_by_their_short_uuid() {
-        assert_eq!(
-            service_name("0000110B-0000-1000-8000-00805F9B34FB"),
-            Some("audio")
-        );
-        assert_eq!(
-            service_name("0000111f-0000-1000-8000-00805f9b34fb"),
-            Some("phone calls")
-        );
-        assert_eq!(service_name("0000ffff-0000-1000-8000-00805f9b34fb"), None);
-        assert_eq!(service_name("6e400001-b5a3-f393-e0a9-e50e24dcca9e"), None);
+    fn an_unnamed_service_shows_its_uuid() {
         assert_eq!(
             message(&RequestKind::Service("x".into())),
             "This device wants to use service x."
