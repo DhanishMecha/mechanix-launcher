@@ -5,8 +5,9 @@
 //! [`AuthCancelled`]. Return or ✓ sends [`AuthAnswer`]; ✕ or dragging the
 //! sheet down sends [`AuthCancel`](crate::signals::AuthCancel).
 //!
-//! The window is a top-layer `prompt` (mx_shell_surface_v1), spawned
-//! before the keyboard's, so the on-screen keyboard shows over it.
+//! The window is an overlay-layer `prompt` (mx_shell_surface_v1), above
+//! every other shell window. It takes the keyboard while shown, and while
+//! it has the focus the compositor stacks the on-screen keyboard over it.
 //!
 //! Not yet: closing for the lock screen, a user picker, the requesting
 //! program.
@@ -112,13 +113,13 @@ pub(crate) fn install(app: &mut App) {
     app.insert_resource(icons);
     let root = app.root();
     let role = Role::Layer(LayerRole {
-        layer: Layer::Top,
+        layer: Layer::Overlay,
         anchor: ALL_SIDES,
         // Clear of the zones others reserve: below the status bar.
         exclusive_zone: 0,
         namespace: NAMESPACE.into(),
-        // A hardware keyboard types into it once it is tapped.
-        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        // The keyboard is its while shown; hidden, it takes nothing.
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
         shell_role: Some(ShellRole::Prompt),
     });
     let window = app
@@ -137,7 +138,7 @@ pub(crate) fn install(app: &mut App) {
         view,
         shown: None,
     });
-    set_mapped(app, false);
+    set_hidden(app, true);
     app.system(|app, e: &AuthRequested| {
         app.resource_mut::<Dialog>().shown = Some(Shown {
             cookie: e.0.cookie.clone(),
@@ -149,7 +150,7 @@ pub(crate) fn install(app: &mut App) {
             checking: false,
             locked: None,
         });
-        set_mapped(app, true);
+        set_hidden(app, false);
         refresh(app, Clear::All);
     })
     .system(|app, e: &AuthUser| {
@@ -241,7 +242,7 @@ fn close(app: &mut App, cookie: &str) {
         dialog.shown = None;
     }
     refresh(app, Clear::All);
-    set_mapped(app, false);
+    set_hidden(app, true);
 }
 
 fn refresh(app: &mut App, clear: Clear) {
@@ -249,13 +250,14 @@ fn refresh(app: &mut App, clear: Clear) {
     app.emit(Refresh { clear }, view);
 }
 
-fn set_mapped(app: &mut App, mapped: bool) {
+/// Hide or show the dialog's window, keeping its surface.
+fn set_hidden(app: &mut App, hidden: bool) {
     if !app.has_resource::<Surfaces>() || !app.has_resource::<Wayland>() {
         return;
     }
     let window = app.resource::<Dialog>().window;
     let (mut surfaces, mut wl) = app.query::<(ResMut<Surfaces>, ResMut<Wayland>)>();
-    surfaces.set_mapped(window, mapped, &mut wl);
+    surfaces.set_hidden(window, hidden, &mut wl);
 }
 
 /// Start the lockout's countdown.
