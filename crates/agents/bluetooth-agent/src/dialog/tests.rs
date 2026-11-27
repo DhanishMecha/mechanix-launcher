@@ -74,7 +74,7 @@ fn asking(kind: RequestKind) -> App {
 }
 
 fn parts(app: &App) -> Parts {
-    let view = app.resource::<Dialog>().view;
+    let view = app.resource::<Dialog>().window.view();
     app.widget::<PairingDialog>(view).unwrap().parts
 }
 
@@ -336,7 +336,7 @@ fn another_requests_device_is_ignored() {
 }
 
 fn avatar(app: &App) -> SpriteId {
-    let view = app.resource::<Dialog>().view;
+    let view = app.resource::<Dialog>().window.view();
     app.widget::<PairingDialog>(view).unwrap().avatar
 }
 
@@ -369,20 +369,21 @@ fn queue(app: &App) -> &prompt_queue::PromptQueue {
 }
 
 fn has_turn(app: &App) -> bool {
-    app.resource::<Dialog>().turn
+    prompt_queue::has_turn::<Dialog>(app)
 }
 
 /// polkit's prompt shows, then gives the turn back.
 fn other_prompt_shows(app: &mut App) {
-    assert!(prompt_queue::request(app, Owner::Polkit));
+    assert!(prompt_queue::request_owner(app, Owner::Polkit));
 }
 
 fn other_prompt_closes(app: &mut App) {
-    prompt_queue::release(app, Owner::Polkit);
+    prompt_queue::release_owner(app, Owner::Polkit);
     app.flush();
     app.tick();
 }
 
+/// First come, first served: a pairing waits for polkit's prompt shown.
 #[test]
 fn a_request_waits_hidden_while_another_prompt_shows() {
     let mut app = app();

@@ -1,24 +1,5 @@
-//! The polkit dialog: a bottom sheet asking for the password of the
-//! request's user.
-//!
-//! Shown on [`AuthRequested`], hidden on [`AuthFinished`] or
-//! [`AuthCancelled`]. Return or ✓ sends [`AuthAnswer`]; ✕ or dragging the
-//! sheet down sends [`AuthCancel`](crate::signals::AuthCancel).
-//!
-//! The window is an overlay-layer `prompt` (mx_shell_surface_v1), above
-//! every other shell window. It takes the keyboard while shown, and while
-//! it has the focus the compositor stacks the on-screen keyboard over it.
-//!
-//! One system prompt shows at a time ([`prompt_queue`]): asked for while
-//! another shows, the request waits with the window hidden, and leaves the
-//! keyboard focus alone, until [`PromptTurn`]. What it is told meanwhile
-//! is kept, and shown then.
-//!
-//! Not yet: closing for the lock screen, a user picker, the requesting
-//! program.
-
 use mecha_wayland::prelude::*;
-use prompt_queue::{Owner, PromptTurn};
+use prompt_queue::{Owner, PromptWindow};
 use std::time::Instant;
 
 use crate::signals::{
@@ -31,10 +12,6 @@ mod view;
 use view::{PolkitDialog, PolkitDialogBuilder};
 
 const NAMESPACE: &str = "polkit-agent";
-
-const ALL_SIDES: Anchor = Anchor::from_bits_truncate(
-    Anchor::TOP.bits() | Anchor::BOTTOM.bits() | Anchor::LEFT.bits() | Anchor::RIGHT.bits(),
-);
 
 const ICON: u32 = 24;
 /// The header's icons (✕, ✓), and their tap area.
@@ -81,16 +58,41 @@ struct Shown {
 }
 
 struct Dialog {
-    window: NodeId,
-    view: Handle<PolkitDialog>,
+    window: PromptWindow<PolkitDialog>,
+    /// The request, shown or waiting its turn.
     shown: Option<Shown>,
     /// A hardware keyboard's Caps Lock, as the compositor last said.
     caps_lock: bool,
-    /// The request shown has the prompt's turn: the window shows. Without
-    /// it, the request waits, hidden.
-    turn: bool,
 }
 impl Resource for Dialog {}
+
+impl prompt_queue::Prompt for Dialog {
+    const OWNER: Owner = Owner::Polkit;
+    type View = PolkitDialog;
+
+    fn window(&self) -> &PromptWindow<PolkitDialog> {
+        &self.window
+    }
+
+    fn window_mut(&mut self) -> &mut PromptWindow<PolkitDialog> {
+        &mut self.window
+    }
+
+    fn has_request(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    fn showing(app: &mut App) {
+        refresh(app, Clear::All);
+        countdown(app);
+    }
+
+    /// The keyboard is let go by the queue; the view, seeing no turn,
+    /// shuts the field so it does not take it back.
+    fn hiding(app: &mut App) {
+        refresh(app, Clear::All);
+    }
+}
 
 impl Dialog {
     fn shown(&mut self, cookie: &str) -> Option<&mut Shown> {
@@ -123,37 +125,13 @@ pub(crate) fn install(app: &mut App) {
         }
     };
     app.insert_resource(icons);
-    let root = app.root();
-    let role = Role::Layer(LayerRole {
-        layer: Layer::Overlay,
-        anchor: ALL_SIDES,
-        // Clear of the zones others reserve: below the status bar.
-        exclusive_zone: 0,
-        namespace: NAMESPACE.into(),
-        // The keyboard is its while shown; hidden, it takes nothing.
-        keyboard_interactivity: KeyboardInteractivity::Exclusive,
-        shell_role: Some(ShellRole::Prompt),
-    });
-    let window = app
-        .spawn_with(
-            root,
-            window()
-                .title(NAMESPACE)
-                .layout(LayoutStyle::default())
-                .clear(Color::TRANSPARENT),
-            (role,),
-        )
-        .id();
-    let view = app.spawn(window, PolkitDialogBuilder);
+    let window = PromptWindow::spawn(app, NAMESPACE, PolkitDialogBuilder);
     app.insert_resource(Dialog {
         window,
-        view,
         shown: None,
         caps_lock: false,
-        turn: false,
     });
-    set_hidden(app, true);
-    prompt_queue::install(app);
+    prompt_queue::install::<Dialog>(app);
     app.system(|app, e: &AuthRequested| {
         app.resource_mut::<Dialog>().shown = Some(Shown {
             cookie: e.0.cookie.clone(),
@@ -165,19 +143,7 @@ pub(crate) fn install(app: &mut App) {
             checking: false,
             locked: None,
         });
-        if prompt_queue::request(app, Owner::Polkit) {
-            take_turn(app);
-        }
-    })
-    .system(|app, e: &PromptTurn| {
-        if e.0 != Owner::Polkit {
-            return;
-        }
-        if app.resource::<Dialog>().shown.is_some() {
-            take_turn(app);
-        } else {
-            prompt_queue::release(app, Owner::Polkit);
-        }
+        prompt_queue::request::<Dialog>(app);
     })
     .system(|app, e: &AuthUser| {
         update(app, &e.cookie, |s| {
@@ -269,64 +235,34 @@ fn update(app: &mut App, cookie: &str, change: impl FnOnce(&mut Shown) -> bool) 
     );
 }
 
-/// The request waiting has its turn: show it, as it stands now.
-fn take_turn(app: &mut App) {
-    app.resource_mut::<Dialog>().turn = true;
-    set_hidden(app, false);
-    refresh(app, Clear::All);
-    countdown(app);
-}
-
 /// Count a lockout down, if the dialog shows one.
 fn countdown(app: &mut App) {
-    let (turn, locked, view) = {
-        let dialog = app.resource::<Dialog>();
-        let locked = dialog.shown.as_ref().is_some_and(|s| s.locked.is_some());
-        (dialog.turn, locked, dialog.view)
-    };
-    if turn && locked {
-        app.emit(Countdown, view);
+    let locked = app
+        .resource::<Dialog>()
+        .shown
+        .as_ref()
+        .is_some_and(|s| s.locked.is_some());
+    if locked {
+        prompt_queue::emit::<Dialog, _>(app, Countdown);
     }
 }
 
 fn close(app: &mut App, cookie: &str) {
-    let turn = {
+    {
         let mut dialog = app.resource_mut::<Dialog>();
         if dialog.shown(cookie).is_none() {
             return;
         }
         dialog.shown = None;
-        dialog.turn
-    };
-    if turn {
-        refresh(app, Clear::All);
-        set_hidden(app, true);
-        app.resource_mut::<Dialog>().turn = false;
     }
-    // Shown, the next prompt's turn; waiting, out of line.
-    prompt_queue::release(app, Owner::Polkit);
+    // Shown, hidden and the next prompt's turn; waiting, out of line.
+    prompt_queue::release::<Dialog>(app);
 }
 
 /// Redraw from the [`Dialog`]: only with the turn, so a waiting request
 /// takes nothing, the keyboard focus least of all.
 fn refresh(app: &mut App, clear: Clear) {
-    let (turn, view) = {
-        let dialog = app.resource::<Dialog>();
-        (dialog.turn, dialog.view)
-    };
-    if turn {
-        app.emit(Refresh { clear }, view);
-    }
-}
-
-/// Hide or show the dialog's window, keeping its surface.
-fn set_hidden(app: &mut App, hidden: bool) {
-    if !app.has_resource::<Surfaces>() || !app.has_resource::<Wayland>() {
-        return;
-    }
-    let window = app.resource::<Dialog>().window;
-    let (mut surfaces, mut wl) = app.query::<(ResMut<Surfaces>, ResMut<Wayland>)>();
-    surfaces.set_hidden(window, hidden, &mut wl);
+    prompt_queue::emit::<Dialog, _>(app, Refresh { clear });
 }
 
 /// Start the lockout's countdown.

@@ -540,7 +540,8 @@ fn sync_field(ctx: &mut Context<'_, PolkitDialog>) {
         };
         let last_prompt = shown.and_then(|s| s.last_prompt.as_deref());
         (
-            prompt.is_some(),
+            // Without the turn, hidden: nothing to type into.
+            dialog.window.has_turn() && prompt.is_some(),
             !prompt.is_some_and(|q| q.echo),
             note,
             placeholder(last_prompt.unwrap_or(DEFAULT_PROMPT)).to_owned(),
@@ -632,9 +633,22 @@ fn blur_field(ctx: &mut Context<'_, PolkitDialog>) {
 }
 
 pub(super) fn show(ctx: &mut Context<'_, PolkitDialog>, e: &Refresh) {
-    let (shown, user, message) = match &ctx.resource::<Dialog>().shown {
-        Some(s) => (true, s.user.clone().unwrap_or_default(), s.message.clone()),
-        None => (false, String::new(), String::new()),
+    let (shown, turn, user, message) = {
+        let dialog = ctx.resource::<Dialog>();
+        match &dialog.shown {
+            Some(s) => (
+                true,
+                dialog.window.has_turn(),
+                s.user.clone().unwrap_or_default(),
+                s.message.clone(),
+            ),
+            None => (
+                false,
+                dialog.window.has_turn(),
+                String::new(),
+                String::new(),
+            ),
+        }
     };
     let p = ctx.me().parts;
     if e.clear != Clear::Nothing {
@@ -668,7 +682,8 @@ pub(super) fn show(ctx: &mut Context<'_, PolkitDialog>, e: &Refresh) {
         t.set_text(message);
     }
     sync_field(ctx);
-    if !shown {
+    // Closed, or waiting its turn.
+    if !shown || !turn {
         blur_field(ctx);
     }
 }

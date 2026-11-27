@@ -170,7 +170,12 @@ fn sync_answer(ctx: Ctx) {
     let (entry, error) = {
         let dialog = ctx.resource::<Dialog>();
         (
-            dialog.shown.as_ref().and_then(|r| prompt::entry(&r.kind)),
+            // Without the turn, hidden: nothing to type into.
+            dialog
+                .shown
+                .as_ref()
+                .filter(|_| dialog.window.has_turn())
+                .and_then(|r| prompt::entry(&r.kind)),
             dialog.error,
         )
     };

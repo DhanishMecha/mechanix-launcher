@@ -97,12 +97,12 @@ fn asking() -> App {
 }
 
 fn parts(app: &App) -> Parts {
-    let view = app.resource::<Dialog>().view;
+    let view = app.resource::<Dialog>().window.view();
     app.widget::<PolkitDialog>(view).unwrap().parts
 }
 
 fn view(app: &App) -> &PolkitDialog {
-    let view = app.resource::<Dialog>().view;
+    let view = app.resource::<Dialog>().window.view();
     app.widget::<PolkitDialog>(view).unwrap()
 }
 
@@ -409,7 +409,7 @@ fn a_lockout_counts_down_then_the_next_prompt_reopens_the_field() {
 
     // A tick keeps counting while locked.
     let id = view(&app).tick;
-    let node = app.resource::<Dialog>().view;
+    let node = app.resource::<Dialog>().window.view();
     emit_to(&mut app, node, Timeout { id });
     assert!(note(&app).unwrap().starts_with("Too many attempts"));
 
@@ -601,16 +601,16 @@ fn queue(app: &App) -> &prompt_queue::PromptQueue {
 }
 
 fn has_turn(app: &App) -> bool {
-    app.resource::<Dialog>().turn
+    prompt_queue::has_turn::<Dialog>(app)
 }
 
 /// Another prompt (Bluetooth's) shows, then gives the turn back.
 fn other_prompt_shows(app: &mut App) {
-    assert!(prompt_queue::request(app, Owner::Bluetooth));
+    assert!(prompt_queue::request_owner(app, Owner::Bluetooth));
 }
 
 fn other_prompt_closes(app: &mut App) {
-    prompt_queue::release(app, Owner::Bluetooth);
+    prompt_queue::release_owner(app, Owner::Bluetooth);
     app.flush();
     app.tick();
 }
@@ -685,4 +685,29 @@ fn a_lockout_told_while_waiting_counts_down_once_shown() {
 
     other_prompt_closes(&mut app);
     assert_eq!(note(&app), Some(locked_text(Duration::from_secs(30))));
+}
+
+/// First come, first served: a pairing asked for while this shows waits,
+/// and the typing goes on.
+#[test]
+fn a_pairing_asked_for_meanwhile_waits() {
+    let mut app = asking();
+    type_text(&mut app, "hunter2");
+    assert!(!prompt_queue::request_owner(&mut app, Owner::Bluetooth));
+    app.flush();
+    app.tick();
+    assert!(has_turn(&app));
+    assert!(has_focus(&app));
+    assert_eq!(field(&app).text(), "hunter2");
+    assert!(queue(&app).is_waiting(Owner::Bluetooth));
+
+    signal(
+        &mut app,
+        AuthFinished {
+            cookie: COOKIE.into(),
+            result: Ok(()),
+        },
+    );
+    assert_eq!(queue(&app).shown(), Some(Owner::Bluetooth));
+    assert!(!has_focus(&app));
 }
