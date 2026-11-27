@@ -9,10 +9,16 @@
 //! every other shell window. It takes the keyboard while shown, and while
 //! it has the focus the compositor stacks the on-screen keyboard over it.
 //!
+//! One system prompt shows at a time ([`prompt_queue`]): asked for while
+//! another shows, the request waits with the window hidden, and leaves the
+//! keyboard focus alone, until [`PromptTurn`]. What it is told meanwhile
+//! is kept, and shown then.
+//!
 //! Not yet: closing for the lock screen, a user picker, the requesting
 //! program.
 
 use mecha_wayland::prelude::*;
+use prompt_queue::{Owner, PromptTurn};
 use std::time::Instant;
 
 use crate::signals::{
@@ -80,6 +86,9 @@ struct Dialog {
     shown: Option<Shown>,
     /// A hardware keyboard's Caps Lock, as the compositor last said.
     caps_lock: bool,
+    /// The request shown has the prompt's turn: the window shows. Without
+    /// it, the request waits, hidden.
+    turn: bool,
 }
 impl Resource for Dialog {}
 
@@ -141,8 +150,10 @@ pub(crate) fn install(app: &mut App) {
         view,
         shown: None,
         caps_lock: false,
+        turn: false,
     });
     set_hidden(app, true);
+    prompt_queue::install(app);
     app.system(|app, e: &AuthRequested| {
         app.resource_mut::<Dialog>().shown = Some(Shown {
             cookie: e.0.cookie.clone(),
@@ -154,8 +165,19 @@ pub(crate) fn install(app: &mut App) {
             checking: false,
             locked: None,
         });
-        set_hidden(app, false);
-        refresh(app, Clear::All);
+        if prompt_queue::request(app, Owner::Polkit) {
+            take_turn(app);
+        }
+    })
+    .system(|app, e: &PromptTurn| {
+        if e.0 != Owner::Polkit {
+            return;
+        }
+        if app.resource::<Dialog>().shown.is_some() {
+            take_turn(app);
+        } else {
+            prompt_queue::release(app, Owner::Polkit);
+        }
     })
     .system(|app, e: &AuthUser| {
         update(app, &e.cookie, |s| {
@@ -183,8 +205,7 @@ pub(crate) fn install(app: &mut App) {
             s.locked = Some(Instant::now() + e.wait);
             true
         });
-        let view = app.resource::<Dialog>().view;
-        app.emit(Countdown, view);
+        countdown(app);
     })
     .system(|app, e: &AuthMessage| {
         update(app, &e.cookie, |s| {
@@ -248,21 +269,54 @@ fn update(app: &mut App, cookie: &str, change: impl FnOnce(&mut Shown) -> bool) 
     );
 }
 
+/// The request waiting has its turn: show it, as it stands now.
+fn take_turn(app: &mut App) {
+    app.resource_mut::<Dialog>().turn = true;
+    set_hidden(app, false);
+    refresh(app, Clear::All);
+    countdown(app);
+}
+
+/// Count a lockout down, if the dialog shows one.
+fn countdown(app: &mut App) {
+    let (turn, locked, view) = {
+        let dialog = app.resource::<Dialog>();
+        let locked = dialog.shown.as_ref().is_some_and(|s| s.locked.is_some());
+        (dialog.turn, locked, dialog.view)
+    };
+    if turn && locked {
+        app.emit(Countdown, view);
+    }
+}
+
 fn close(app: &mut App, cookie: &str) {
-    {
+    let turn = {
         let mut dialog = app.resource_mut::<Dialog>();
         if dialog.shown(cookie).is_none() {
             return;
         }
         dialog.shown = None;
+        dialog.turn
+    };
+    if turn {
+        refresh(app, Clear::All);
+        set_hidden(app, true);
+        app.resource_mut::<Dialog>().turn = false;
     }
-    refresh(app, Clear::All);
-    set_hidden(app, true);
+    // Shown, the next prompt's turn; waiting, out of line.
+    prompt_queue::release(app, Owner::Polkit);
 }
 
+/// Redraw from the [`Dialog`]: only with the turn, so a waiting request
+/// takes nothing, the keyboard focus least of all.
 fn refresh(app: &mut App, clear: Clear) {
-    let view = app.resource::<Dialog>().view;
-    app.emit(Refresh { clear }, view);
+    let (turn, view) = {
+        let dialog = app.resource::<Dialog>();
+        (dialog.turn, dialog.view)
+    };
+    if turn {
+        app.emit(Refresh { clear }, view);
+    }
 }
 
 /// Hide or show the dialog's window, keeping its surface.

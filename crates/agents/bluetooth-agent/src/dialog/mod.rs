@@ -15,9 +15,14 @@
 //! every other shell window. It takes the keyboard while shown, and while
 //! it has the focus the compositor stacks the on-screen keyboard over it.
 //!
+//! One system prompt shows at a time ([`prompt_queue`]): asked for while
+//! another shows, the request waits with the window hidden until
+//! [`PromptTurn`]; what it is told meanwhile is kept, and shown then.
+//!
 //! Not yet: closing for the lock screen.
 
 use mecha_wayland::prelude::*;
+use prompt_queue::{Owner, PromptTurn};
 
 use crate::signals::{
     PairingAbort, PairingAnswer, PairingCancelled, PairingDevice, PairingRequested, PairingUpdated,
@@ -85,6 +90,9 @@ struct Dialog {
     shown: Option<Request>,
     /// Why the typed answer was not sent.
     error: Option<&'static str>,
+    /// The request shown has the prompt's turn: the window shows. Without
+    /// it, the request waits, hidden.
+    turn: bool,
 }
 impl Resource for Dialog {}
 
@@ -142,16 +150,29 @@ pub(crate) fn install(app: &mut App) {
         view,
         shown: None,
         error: None,
+        turn: false,
     });
     set_hidden(app, true);
+    prompt_queue::install(app);
     app.system(|app, e: &PairingRequested| {
         {
             let mut dialog = app.resource_mut::<Dialog>();
             dialog.shown = Some(e.0.clone());
             dialog.error = None;
         }
-        set_hidden(app, false);
-        refresh(app, true);
+        if prompt_queue::request(app, Owner::Bluetooth) {
+            take_turn(app);
+        }
+    })
+    .system(|app, e: &PromptTurn| {
+        if e.0 != Owner::Bluetooth {
+            return;
+        }
+        if app.resource::<Dialog>().shown.is_some() {
+            take_turn(app);
+        } else {
+            prompt_queue::release(app, Owner::Bluetooth);
+        }
     })
     .system(|app, e: &PairingUpdated| {
         let moved = {
@@ -185,23 +206,42 @@ pub(crate) fn install(app: &mut App) {
     .system(|app, e: &PairingAbort| close(app, e.id));
 }
 
+/// The request waiting has its turn: show it, as it stands now.
+fn take_turn(app: &mut App) {
+    app.resource_mut::<Dialog>().turn = true;
+    set_hidden(app, false);
+    refresh(app, true);
+}
+
 fn close(app: &mut App, id: u64) {
-    {
+    let turn = {
         let mut dialog = app.resource_mut::<Dialog>();
         if dialog.shown(id).is_none() {
             return;
         }
         dialog.shown = None;
         dialog.error = None;
+        dialog.turn
+    };
+    if turn {
+        refresh(app, true);
+        set_hidden(app, true);
+        app.resource_mut::<Dialog>().turn = false;
     }
-    refresh(app, true);
-    set_hidden(app, true);
+    // Shown, the next prompt's turn; waiting, out of line.
+    prompt_queue::release(app, Owner::Bluetooth);
 }
 
-/// Redraw from the [`Dialog`]; `clear` empties the fields.
+/// Redraw from the [`Dialog`]; `clear` empties the fields. Only with the
+/// turn: a waiting request takes nothing.
 fn refresh(app: &mut App, clear: bool) {
-    let view = app.resource::<Dialog>().view;
-    app.emit(Refresh { clear }, view);
+    let (turn, view) = {
+        let dialog = app.resource::<Dialog>();
+        (dialog.turn, dialog.view)
+    };
+    if turn {
+        app.emit(Refresh { clear }, view);
+    }
 }
 
 /// Hide or show the dialog's window, keeping its surface.

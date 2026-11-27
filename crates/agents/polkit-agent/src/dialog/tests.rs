@@ -595,3 +595,94 @@ fn a_wrong_password_says_so_over_caps_lock_until_typing_again() {
     type_text(&mut app, "r");
     assert_eq!(note(&app).as_deref(), Some(CAPS_LOCK));
 }
+
+fn queue(app: &App) -> &prompt_queue::PromptQueue {
+    app.resource::<prompt_queue::PromptQueue>()
+}
+
+fn has_turn(app: &App) -> bool {
+    app.resource::<Dialog>().turn
+}
+
+/// Another prompt (Bluetooth's) shows, then gives the turn back.
+fn other_prompt_shows(app: &mut App) {
+    assert!(prompt_queue::request(app, Owner::Bluetooth));
+}
+
+fn other_prompt_closes(app: &mut App) {
+    prompt_queue::release(app, Owner::Bluetooth);
+    app.flush();
+    app.tick();
+}
+
+#[test]
+fn a_request_waits_hidden_while_another_prompt_shows() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, COOKIE);
+    signal(
+        &mut app,
+        AuthUser {
+            cookie: COOKIE.into(),
+            user: "dhanish".into(),
+        },
+    );
+    prompt(&mut app, COOKIE);
+
+    assert!(!has_turn(&app));
+    assert!(queue(&app).is_waiting(Owner::Polkit));
+    // Nothing drawn, and the keyboard left to the prompt shown.
+    assert!(!has_focus(&app));
+    assert_eq!(text_of(&app, parts(&app).user), "");
+
+    other_prompt_closes(&mut app);
+    assert!(has_turn(&app));
+    assert_eq!(queue(&app).shown(), Some(Owner::Polkit));
+    assert!(has_focus(&app));
+    assert_eq!(text_of(&app, parts(&app).user), "dhanish");
+}
+
+#[test]
+fn a_request_cancelled_while_waiting_leaves_the_line() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, COOKIE);
+    signal(
+        &mut app,
+        AuthCancelled {
+            cookie: COOKIE.into(),
+        },
+    );
+    assert!(!queue(&app).is_waiting(Owner::Polkit));
+
+    other_prompt_closes(&mut app);
+    assert_eq!(queue(&app).shown(), None);
+    assert!(!has_turn(&app));
+}
+
+#[test]
+fn closing_gives_the_turn_back() {
+    let mut app = asking();
+    assert_eq!(queue(&app).shown(), Some(Owner::Polkit));
+    signal(
+        &mut app,
+        AuthFinished {
+            cookie: COOKIE.into(),
+            result: Ok(()),
+        },
+    );
+    assert_eq!(queue(&app).shown(), None);
+    assert!(!has_turn(&app));
+}
+
+#[test]
+fn a_lockout_told_while_waiting_counts_down_once_shown() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, COOKIE);
+    lock(&mut app, Duration::from_secs(30));
+    assert!(!has_turn(&app));
+
+    other_prompt_closes(&mut app);
+    assert_eq!(note(&app), Some(locked_text(Duration::from_secs(30))));
+}

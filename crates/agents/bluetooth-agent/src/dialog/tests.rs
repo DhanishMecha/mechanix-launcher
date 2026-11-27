@@ -363,3 +363,84 @@ fn the_avatar_shows_the_kind_of_device() {
     device_named(&mut app, 2, Some("modem"));
     assert_eq!(avatar(&app), icons.bluetooth);
 }
+
+fn queue(app: &App) -> &prompt_queue::PromptQueue {
+    app.resource::<prompt_queue::PromptQueue>()
+}
+
+fn has_turn(app: &App) -> bool {
+    app.resource::<Dialog>().turn
+}
+
+/// polkit's prompt shows, then gives the turn back.
+fn other_prompt_shows(app: &mut App) {
+    assert!(prompt_queue::request(app, Owner::Polkit));
+}
+
+fn other_prompt_closes(app: &mut App) {
+    prompt_queue::release(app, Owner::Polkit);
+    app.flush();
+    app.tick();
+}
+
+#[test]
+fn a_request_waits_hidden_while_another_prompt_shows() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, 1, RequestKind::Confirmation(42));
+    assert!(is_open(&app));
+    assert!(!has_turn(&app));
+    assert!(queue(&app).is_waiting(Owner::Bluetooth));
+    assert_eq!(text_of(&app, parts(&app).name), "");
+
+    // Named while waiting: shown with it.
+    signal(
+        &mut app,
+        PairingDevice {
+            id: 1,
+            device: DeviceInfo {
+                path: ObjectPath::from(PHONE),
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                name: "OnePlus 12".into(),
+                icon: Some("phone".into()),
+            },
+        },
+    );
+    assert_eq!(text_of(&app, parts(&app).name), "");
+
+    other_prompt_closes(&mut app);
+    assert!(has_turn(&app));
+    assert_eq!(queue(&app).shown(), Some(Owner::Bluetooth));
+    assert_eq!(text_of(&app, parts(&app).name), "OnePlus 12");
+    assert_eq!(text_of(&app, parts(&app).code), "000042");
+
+    let ok = parts(&app).ok;
+    click(&mut app, ok);
+    assert_eq!(sent(&app).answers, vec![(1, Reply::Accept)]);
+    assert_eq!(queue(&app).shown(), None);
+}
+
+/// bluetoothd cancelled it, or the agent timed out, while it waited.
+#[test]
+fn a_request_cancelled_while_waiting_leaves_the_line() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, 1, RequestKind::Authorization);
+    signal(&mut app, PairingCancelled { id: 1 });
+    assert!(!is_open(&app));
+    assert!(!queue(&app).is_waiting(Owner::Bluetooth));
+
+    other_prompt_closes(&mut app);
+    assert_eq!(queue(&app).shown(), None);
+    assert!(!has_turn(&app));
+}
+
+#[test]
+fn closing_gives_the_turn_back() {
+    let mut app = asking(RequestKind::Authorization);
+    assert_eq!(queue(&app).shown(), Some(Owner::Bluetooth));
+    let cancel = parts(&app).cancel;
+    click(&mut app, cancel);
+    assert_eq!(queue(&app).shown(), None);
+    assert!(!has_turn(&app));
+}

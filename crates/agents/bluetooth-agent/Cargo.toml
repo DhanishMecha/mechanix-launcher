@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 assets.workspace = true
 mecha-wayland.workspace = true
+prompt-queue.workspace = true
 tracing = "0.1"
 
 [dev-dependencies]

@@ -46,6 +46,7 @@ members = [
     "crates/power-menu",
     "crates/agents/polkit-agent",
     "crates/agents/bluetooth-agent",
+    "crates/agents/prompt-queue",
 ]
 resolver = "3"
 
@@ -70,6 +71,7 @@ lockscreen = { path = "crates/lockscreen" }
 power-menu = { path = "crates/power-menu" }
 polkit-agent = { path = "crates/agents/polkit-agent" }
 bluetooth-agent = { path = "crates/agents/bluetooth-agent" }
+prompt-queue = { path = "crates/agents/prompt-queue" }
 
 # Local development override — assumes mecha-wayland is cloned as a sibling
 # directory: ../mecha-wayland
