@@ -17,8 +17,12 @@ use super::interface::{AGENT_PATH, BLUEZ};
 const MANAGER_PATH: &str = "/org/bluez";
 const AGENT_MANAGER: &str = "org.bluez.AgentManager1";
 
-/// What the agent can do: show a code and take one typed on the
-/// on-screen keyboard.
+/// What the agent can do: show a code, and take one typed on a keyboard.
+///
+/// Classic Bluetooth has no `KeyboardDisplay`, so the kernel already uses
+/// `DisplayYesNo` there; only LE uses this value (same as Android).
+/// Don't switch to `DisplayYesNo`: LE devices that only show a code
+/// (bands, locks) would then pair without any check.
 pub(crate) const CAPABILITY: &str = "KeyboardDisplay";
 
 const DAEMON: &str = "org.freedesktop.DBus";

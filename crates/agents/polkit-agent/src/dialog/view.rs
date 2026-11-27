@@ -8,7 +8,7 @@ use mecha_wayland::mechanix_widgets::prelude::{
 use mecha_wayland::prelude::*;
 use std::time::{Duration, Instant};
 
-use super::{Clear, Countdown, Dialog, HEADER_ICON, Icons, Note, Refresh};
+use super::{CAPS_LOCK, Clear, Countdown, Dialog, HEADER_ICON, Icons, Note, Refresh};
 use crate::helper::protocol::{UNSENDABLE, sendable};
 use crate::signals::{AuthAnswer, AuthCancel};
 
@@ -31,6 +31,9 @@ pub(super) struct PolkitDialog {
     pub(super) empty: bool,
     pub(super) revealed: bool,
     pub(super) focused: bool,
+    /// The field takes typing: a prompt is waiting. It takes the keyboard
+    /// focus each time it opens.
+    pub(super) open: bool,
     /// Something was typed for this request: ✓ shows from then on.
     pub(super) started: bool,
     /// The field's length, to tell an edit from a focus change.
@@ -140,6 +143,7 @@ impl Widget for PolkitDialog {
             empty: true,
             revealed: false,
             focused: false,
+            open: false,
             started: false,
             len: 0,
             tick,
@@ -519,8 +523,9 @@ fn display(shown: bool) -> Display {
 }
 
 fn sync_field(ctx: &mut Context<'_, PolkitDialog>) {
-    let (open, secret, note, hint, checking) = {
-        let shown = ctx.resource::<Dialog>().shown.as_ref();
+    let (open, secret, note, hint, checking, caps_lock) = {
+        let dialog = ctx.resource::<Dialog>();
+        let shown = dialog.shown.as_ref();
         let prompt = shown.and_then(|s| s.prompt.as_ref());
         let locked = shown
             .and_then(|s| s.locked)
@@ -540,6 +545,7 @@ fn sync_field(ctx: &mut Context<'_, PolkitDialog>) {
             note,
             placeholder(last_prompt.unwrap_or(DEFAULT_PROMPT)).to_owned(),
             shown.is_some_and(|s| s.checking),
+            dialog.caps_lock,
         )
     };
     let (p, empty, revealed, focused, started) = {
@@ -559,6 +565,11 @@ fn sync_field(ctx: &mut Context<'_, PolkitDialog>) {
         i.set_disabled(!open);
         i.set_caret_color(accent);
     }
+    // Enabled first: a disabled field takes no focus.
+    if open && !std::mem::replace(&mut ctx.me().open, open) {
+        focus_field(ctx);
+    }
+    ctx.me().open = open;
     if let Some(mut l) = ctx.at(p.line) {
         l.set_background(accent);
     }
@@ -587,19 +598,36 @@ fn sync_field(ctx: &mut Context<'_, PolkitDialog>) {
         });
     }
 
-    let (line, error) = match note {
-        Some(n) => (n.text, n.error),
-        None if checking => (CHECKING.into(), false),
-        None => Default::default(),
+    let quiet = ColorRole::OnSurfaceVariant;
+    let (line, color) = match note {
+        Some(n) if n.error => (n.text, ColorRole::Error),
+        Some(n) => (n.text, quiet),
+        None if checking => (CHECKING.into(), quiet),
+        // Only while typing; any other note says more.
+        None if open && caps_lock => (CAPS_LOCK.into(), ColorRole::Primary),
+        None => (String::new(), quiet),
     };
     if let Some(mut t) = ctx.at(p.note) {
         t.set_display(display(!line.is_empty()));
         t.set_text(line);
-        t.set_color(if error {
-            ColorRole::Error
-        } else {
-            ColorRole::OnSurfaceVariant
-        });
+        t.set_color(color);
+    }
+}
+
+/// The field takes the keyboard: typing goes to it, and the on-screen
+/// keyboard shows for it.
+fn focus_field(ctx: &mut Context<'_, PolkitDialog>) {
+    let input = ctx.me().parts.input.id();
+    ctx.emit(InputFocus { focused: true }, input);
+    ctx.resource_mut::<KeyboardFocus>().focus(input);
+}
+
+/// The dialog is gone: the field gives the keyboard up, if it has it.
+fn blur_field(ctx: &mut Context<'_, PolkitDialog>) {
+    let input = ctx.me().parts.input.id();
+    let mut focus = ctx.resource_mut::<KeyboardFocus>();
+    if focus.focused() == Some(input) {
+        focus.blur();
     }
 }
 
@@ -640,4 +668,7 @@ pub(super) fn show(ctx: &mut Context<'_, PolkitDialog>, e: &Refresh) {
         t.set_text(message);
     }
     sync_field(ctx);
+    if !shown {
+        blur_field(ctx);
+    }
 }

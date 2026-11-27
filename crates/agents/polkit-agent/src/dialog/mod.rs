@@ -35,6 +35,7 @@ const ICON: u32 = 24;
 const HEADER_ICON: f32 = 20.0;
 
 const WRONG: &str = "Incorrect password. Try again.";
+const CAPS_LOCK: &str = "Caps Lock is on";
 #[derive(Clone, Copy)]
 struct Icons {
     close: SpriteId,
@@ -77,6 +78,8 @@ struct Dialog {
     window: NodeId,
     view: Handle<PolkitDialog>,
     shown: Option<Shown>,
+    /// A hardware keyboard's Caps Lock, as the compositor last said.
+    caps_lock: bool,
 }
 impl Resource for Dialog {}
 
@@ -137,6 +140,7 @@ pub(crate) fn install(app: &mut App) {
         window,
         view,
         shown: None,
+        caps_lock: false,
     });
     set_hidden(app, true);
     app.system(|app, e: &AuthRequested| {
@@ -209,6 +213,17 @@ pub(crate) fn install(app: &mut App) {
             s.note = None;
             false
         });
+    })
+    // Sent each time the dialog takes the keyboard, and on each change.
+    .system(|app, e: &ModifiersChanged| {
+        let shown = {
+            let mut dialog = app.resource_mut::<Dialog>();
+            let was = std::mem::replace(&mut dialog.caps_lock, e.0.caps_lock);
+            was != e.0.caps_lock && dialog.shown.is_some()
+        };
+        if shown {
+            refresh(app, Clear::Nothing);
+        }
     })
     .system(|app, e: &AuthFinished| close(app, &e.cookie))
     .system(|app, e: &AuthCancelled| close(app, &e.cookie));

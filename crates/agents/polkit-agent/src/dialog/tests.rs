@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use mecha_wayland::mechanix_widgets::NativeText;
-use mecha_wayland::mechanix_widgets::prelude::{BottomSheet, FontBook, Text};
+use mecha_wayland::mechanix_widgets::prelude::{BottomSheet, ColorSource, FontBook, Text};
 
 use std::time::Duration;
 
@@ -157,6 +157,10 @@ fn text_of(app: &App, h: Handle<Text>) -> String {
 
 fn shown(app: &App, node: impl Into<NodeId>) -> bool {
     app.component::<LayoutStyle>(node.into()).unwrap().display == Display::Flex
+}
+
+fn note_color(app: &App) -> Option<ColorSource> {
+    app.widget::<Text>(parts(app).note).unwrap().color
 }
 
 fn note(app: &App) -> Option<String> {
@@ -473,4 +477,121 @@ fn a_prompt_reads_as_a_placeholder() {
     assert_eq!(placeholder("  Verification code:"), "Verification code");
     assert_eq!(placeholder(":"), DEFAULT_PROMPT);
     assert_eq!(placeholder(""), DEFAULT_PROMPT);
+}
+
+fn has_focus(app: &App) -> bool {
+    app.resource::<KeyboardFocus>().focused() == Some(parts(app).input.id())
+}
+
+/// The field takes the keyboard as soon as polkit asks: no tap needed.
+#[test]
+fn the_field_takes_the_keyboard_when_asked_for_a_password() {
+    let mut app = app();
+    request(&mut app, COOKIE);
+    // Nothing asked yet: the field is shut, and takes nothing.
+    assert!(!has_focus(&app));
+
+    prompt(&mut app, COOKIE);
+    assert!(has_focus(&app));
+    assert!(view(&app).focused);
+    // Typed straight away, into the field.
+    type_text(&mut app, "hunter2");
+    assert_eq!(field(&app).text(), "hunter2");
+}
+
+/// After a wrong password, the next prompt has the keyboard again.
+#[test]
+fn the_field_has_the_keyboard_again_after_a_wrong_password() {
+    let mut app = asking();
+    signal(
+        &mut app,
+        AuthRetry {
+            cookie: COOKIE.into(),
+        },
+    );
+    prompt(&mut app, COOKIE);
+    assert!(has_focus(&app));
+    assert!(view(&app).focused);
+}
+
+/// Closed, the dialog gives the keyboard up.
+#[test]
+fn closing_gives_the_keyboard_up() {
+    let mut app = asking();
+    assert!(has_focus(&app));
+    signal(
+        &mut app,
+        AuthFinished {
+            cookie: COOKIE.into(),
+            result: Ok(()),
+        },
+    );
+    assert!(!has_focus(&app));
+    assert_eq!(app.resource::<KeyboardFocus>().focused(), None);
+}
+
+/// Something else holding the keyboard when the dialog closes keeps it.
+#[test]
+fn closing_leaves_another_focus_alone() {
+    let mut app = asking();
+    let other = app.root();
+    app.resource_mut::<KeyboardFocus>().focus(other);
+    signal(
+        &mut app,
+        AuthCancelled {
+            cookie: COOKIE.into(),
+        },
+    );
+    assert_eq!(app.resource::<KeyboardFocus>().focused(), Some(other));
+}
+
+fn caps_lock(app: &mut App, on: bool) {
+    signal(
+        app,
+        ModifiersChanged(Modifiers {
+            caps_lock: on,
+            ..Modifiers::default()
+        }),
+    );
+}
+
+#[test]
+fn caps_lock_shows_under_the_field_while_asking() {
+    let mut app = asking();
+    caps_lock(&mut app, true);
+    assert_eq!(note(&app).as_deref(), Some(CAPS_LOCK));
+    assert_eq!(note_color(&app), Some(ColorRole::Primary.into()));
+    caps_lock(&mut app, false);
+    assert_eq!(note(&app), None);
+}
+
+#[test]
+fn caps_lock_on_before_the_request_shows_once_asked() {
+    let mut app = app();
+    caps_lock(&mut app, true);
+    request(&mut app, COOKIE);
+    // No prompt yet: nothing to type into.
+    assert_eq!(note(&app), None);
+    prompt(&mut app, COOKIE);
+    assert_eq!(note(&app).as_deref(), Some(CAPS_LOCK));
+}
+
+#[test]
+fn a_wrong_password_says_so_over_caps_lock_until_typing_again() {
+    let mut app = asking();
+    caps_lock(&mut app, true);
+    type_text(&mut app, "WRONG");
+    submit_field(&mut app);
+    assert_eq!(note(&app).as_deref(), Some(CHECKING));
+    signal(
+        &mut app,
+        AuthRetry {
+            cookie: COOKIE.into(),
+        },
+    );
+    prompt(&mut app, COOKIE);
+    assert_eq!(note(&app).as_deref(), Some(super::WRONG));
+
+    type_text(&mut app, "r");
+    assert_eq!(note(&app).as_deref(), Some(CAPS_LOCK));
 }
