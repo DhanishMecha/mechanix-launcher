@@ -45,8 +45,9 @@ pub enum RequestKind {
 }
 
 impl RequestKind {
-    /// Only shown: bluetoothd took its reply already. It ends with
-    /// `Cancel`, or with the device paired.
+    /// Only shown: bluetoothd took its reply already. It ends with the
+    /// device paired, with `Cancel`, when stopped, or when a new request
+    /// or code takes its place: a failed pairing sends nothing.
     pub fn is_display(&self) -> bool {
         matches!(
             self,

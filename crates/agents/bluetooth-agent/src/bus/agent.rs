@@ -2,23 +2,32 @@
 //!
 //! bluetoothd keeps one request per agent in flight, so there is one
 //! active slot: a request call kept unanswered until the dialog answers.
-//! One arriving while the slot is taken gets `Canceled`. The display
-//! calls are answered at once and kept apart, as the code shown; they
-//! never take the slot. Only the registered bluetoothd may call; others
-//! get `AccessDenied`. PINs and passkeys are never logged.
+//! One arriving while the slot is taken gets `Canceled`. Only the
+//! registered bluetoothd may call; others get `AccessDenied`. PINs and
+//! passkeys are never logged.
+//!
+//! The display calls are answered at once and kept apart, as the code
+//! shown; they never take the slot. bluetoothd counts a code shown as
+//! done once answered (`DisplayPasskey` waits for no answer,
+//! `DisplayPinCode` frees its slot on it), so it sends no `Cancel` for
+//! it, even when the pairing fails, and may ask something else while it
+//! still shows. So the newest wins: a request, or another code, takes the
+//! place of the code shown. A `DisplayPasskey` for the same device and
+//! passkey only moves the keys typed.
 //!
 //! Stopping a shown code ([`PairingAbort`]) calls the device's
-//! `CancelPairing`. bluetoothd sends no `Cancel` once a shown code did its
-//! job, so the device's `Paired` is watched while it shows: turning true,
-//! the code is done.
+//! `CancelPairing`. The device's `Paired` is watched while a code shows:
+//! turning true, the code is done.
 //!
 //! A device paired with a code the user checked is trusted: once its
 //! `Paired` turns true, its `Trusted` is set, so bluetoothd lets it
 //! reconnect, and connect its services, without asking again. That is a
 //! code shown (typed on the device), entered (PIN, passkey) or confirmed.
 //! A pairing allowed without a code (`RequestAuthorization`) is not
-//! trusted: its services still ask. Rejected, stopped or cancelled, the
-//! pairing trusts nothing.
+//! trusted: its services still ask. A failed pairing tells the agent
+//! nothing, so the trust is dropped by anything that comes after it: a
+//! new request or code, as well as a rejection, a stop or a `Cancel`.
+//! Only the pairing that was checked is trusted.
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
@@ -194,7 +203,8 @@ fn bad_args(app: &mut App, call: &IncomingCall, error: DecodeError) {
         .reply_error(call, REJECTED, "Bad arguments");
 }
 
-/// A call waiting for the dialog: take the slot, or refuse.
+/// A call waiting for the dialog: take the slot, or refuse while it is
+/// taken. It takes the place of a code shown, and of a trust pending.
 fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKind) {
     if app.resource::<Agent>().active.is_some() {
         tracing::warn!(
@@ -206,6 +216,9 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
         return;
     }
     tracing::info!("bluetooth: {} for {path}", call.member());
+    replace_shown(app);
+    // Whatever was checked before did not pair: trust nothing of it.
+    unwatch_paired(app);
     let id = next_id(app);
     let request = Request {
         id,
@@ -220,8 +233,8 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
     device::read(app, id, &path);
 }
 
-/// A code to show, already answered. A passkey while one is shown only
-/// moves `entered`; anything else is shown.
+/// A code to show, already answered. The passkey shown again, for the
+/// same device, only moves `entered`; anything else takes its place.
 fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
     let update = {
         let mut agent = app.resource_mut::<Agent>();
@@ -229,11 +242,18 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
             (
                 Some(Request {
                     id,
-                    kind: RequestKind::DisplayPasskey { entered, .. },
-                    ..
+                    device,
+                    kind:
+                        RequestKind::DisplayPasskey {
+                            passkey: was,
+                            entered,
+                        },
                 }),
-                RequestKind::DisplayPasskey { entered: now, .. },
-            ) => {
+                RequestKind::DisplayPasskey {
+                    passkey,
+                    entered: now,
+                },
+            ) if device.path == path && was == passkey => {
                 *entered = *now;
                 Some(PairingUpdated {
                     id: *id,
@@ -248,6 +268,7 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
         return;
     }
     tracing::info!("bluetooth: showing a code for {path}");
+    replace_shown(app);
     let id = next_id(app);
     let request = Request {
         id,
@@ -259,6 +280,17 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
     watch_paired(app, &path, true);
     app.signal(PairingRequested(request));
     device::read(app, id, &path);
+}
+
+/// The code shown, if any, gives way to what comes now: the dialog
+/// closes it. Its pairing goes on, unseen; bluetoothd asked for the next.
+fn replace_shown(app: &mut App) {
+    let Some(old) = app.resource_mut::<Agent>().shown.take() else {
+        return;
+    };
+    tracing::info!("bluetooth: the code for {} gives way", old.device.path);
+    unwatch_paired(app);
+    app.signal(PairingCancelled { id: old.id });
 }
 
 /// Follow `path`'s `Paired`, in place of the device watched before;

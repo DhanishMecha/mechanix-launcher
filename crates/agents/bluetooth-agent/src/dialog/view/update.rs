@@ -213,6 +213,31 @@ fn sync_answer(ctx: Ctx) {
             on_surface
         });
     }
+    // Enabled above first: a disabled field takes no focus.
+    if std::mem::replace(&mut ctx.me().focused, entry) != entry {
+        match entry {
+            Some(which) => focus_field(ctx, which),
+            None => blur_fields(ctx),
+        }
+    }
+}
+
+/// `entry`'s field takes the keyboard: typing goes to it, and the
+/// on-screen keyboard shows for it. No tap needed.
+fn focus_field(ctx: Ctx, entry: Entry) {
+    let input = ctx.me().parts.field(entry).input.id();
+    ctx.emit(InputFocus { focused: true }, input);
+    ctx.resource_mut::<KeyboardFocus>().focus(input);
+}
+
+/// Nothing to type: the fields give the keyboard up, if one has it.
+fn blur_fields(ctx: Ctx) {
+    let p = ctx.me().parts;
+    let ours = [p.pin.input.id(), p.passkey.input.id()];
+    let mut focus = ctx.resource_mut::<KeyboardFocus>();
+    if focus.focused().is_some_and(|f| ours.contains(&f)) {
+        focus.blur();
+    }
 }
 
 fn show(ctx: Ctx, e: &Refresh) {

@@ -2,7 +2,8 @@
 //!
 //! Shown on [`PairingRequested`], hidden on [`PairingCancelled`] or once
 //! answered. The device shows by its address and the Bluetooth icon
-//! until [`PairingDevice`] gives its name and kind. What it shows follows the request:
+//! until [`PairingDevice`] gives its name and kind. What it shows follows
+//! the request:
 //!
 //! - a PIN or passkey to enter: a field, sent with ✓ or Return;
 //! - a code to confirm, a pairing or a service to allow: ✓ accepts;
@@ -95,9 +96,29 @@ struct Dialog {
 impl Resource for Dialog {}
 
 impl Dialog {
-    fn shown(&mut self, id: u64) -> Option<&mut Request> {
+    /// The request shown, if it is request `id`.
+    fn request_mut(&mut self, id: u64) -> Option<&mut Request> {
         self.shown.as_mut().filter(|r| r.id == id)
     }
+}
+
+/// An icon that draws nothing: in place of one that did not load.
+const NO_ICON: Bitmap = Bitmap {
+    width: 0,
+    height: 0,
+    format: Format::R8,
+    pixels: Vec::new(),
+};
+
+/// `svg` as an icon `size` pixels high. One that does not load is left
+/// blank, and logged: the dialog still asks without it.
+fn load_icon(atlas: &mut Atlas, svg: &'static [u8], size: u32, what: &str) -> SpriteId {
+    atlas.insert_svg(svg, size).unwrap_or_else(|e| {
+        tracing::error!("bluetooth: the {what} icon did not load: {e:?}");
+        atlas
+            .insert(Class::Icon, &NO_ICON)
+            .expect("an empty icon always inserts")
+    })
 }
 
 /// Spawn the dialog's window, hidden. Install before the keyboard.
@@ -107,11 +128,7 @@ pub(crate) fn install(app: &mut App) {
     }
     let icons = {
         let mut atlas = app.resource_mut::<Atlas>();
-        let mut load = |svg, size, what| {
-            atlas
-                .insert_svg(svg, size)
-                .unwrap_or_else(|e| panic!("the {what} icon loads: {e:?}"))
-        };
+        let mut load = |svg, size, what| load_icon(&mut atlas, svg, size, what);
         Icons {
             close: load(assets::icons::CLEAR, HEADER_ICON as u32, "x"),
             confirm: load(assets::icons::CHECK, HEADER_ICON as u32, "check"),
@@ -175,7 +192,7 @@ pub(crate) fn install(app: &mut App) {
     .system(|app, e: &PairingUpdated| {
         let moved = {
             let mut dialog = app.resource_mut::<Dialog>();
-            match dialog.shown(e.id).map(|r| &mut r.kind) {
+            match dialog.request_mut(e.id).map(|r| &mut r.kind) {
                 Some(RequestKind::DisplayPasskey { entered, .. }) => {
                     *entered = e.entered;
                     true
@@ -191,7 +208,7 @@ pub(crate) fn install(app: &mut App) {
         let named = {
             let mut dialog = app.resource_mut::<Dialog>();
             dialog
-                .shown(e.id)
+                .request_mut(e.id)
                 .map(|r| r.device = e.device.clone())
                 .is_some()
         };
@@ -214,7 +231,7 @@ fn take_turn(app: &mut App) {
 fn close(app: &mut App, id: u64) {
     let turn = {
         let mut dialog = app.resource_mut::<Dialog>();
-        if dialog.shown(id).is_none() {
+        if dialog.request_mut(id).is_none() {
             return;
         }
         dialog.shown = None;

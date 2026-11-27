@@ -236,6 +236,9 @@ pub(super) fn build_field(
             .caret(s.color(ColorRole::Primary))
             .background(Color::TRANSPARENT)
             .border(0.0, Color::TRANSPARENT)
+            // A pairing secret: kept out of the on-screen keyboard's
+            // learning and suggestions.
+            .content_hint(ContentHint::SENSITIVEDATA)
             .content_purpose(purpose)
             .style(
                 LayoutStyle::default()

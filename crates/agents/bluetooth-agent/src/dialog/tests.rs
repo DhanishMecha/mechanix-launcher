@@ -444,3 +444,71 @@ fn closing_gives_the_turn_back() {
     assert_eq!(queue(&app).shown(), None);
     assert!(!has_turn(&app));
 }
+
+/// A broken icon is left blank, not fatal.
+#[test]
+fn an_icon_that_does_not_load_is_blank() {
+    let mut atlas = Atlas::new();
+    let good = load_icon(&mut atlas, assets::icons::CHECK, 20, "check");
+    let broken = load_icon(&mut atlas, b"not an svg", 20, "broken");
+    assert_ne!(good, broken);
+}
+
+fn focused(app: &App) -> Option<NodeId> {
+    app.resource::<KeyboardFocus>().focused()
+}
+
+/// A PIN or passkey to type: its field takes the keyboard as it shows,
+/// no tap needed.
+#[test]
+fn the_field_takes_the_keyboard_when_shown() {
+    let app = asking(RequestKind::PinCode);
+    assert_eq!(focused(&app), Some(parts(&app).pin.input.id()));
+    let app = asking(RequestKind::Passkey);
+    assert_eq!(focused(&app), Some(parts(&app).passkey.input.id()));
+}
+
+#[test]
+fn nothing_to_type_takes_no_keyboard() {
+    let app = asking(RequestKind::Confirmation(42));
+    assert_eq!(focused(&app), None);
+}
+
+#[test]
+fn closing_lets_the_keyboard_go() {
+    let mut app = asking(RequestKind::Passkey);
+    signal(&mut app, PairingCancelled { id: 1 });
+    assert_eq!(focused(&app), None);
+}
+
+/// Waiting its turn, the field takes nothing; given it, it does.
+#[test]
+fn a_waiting_field_takes_the_keyboard_only_with_its_turn() {
+    let mut app = app();
+    other_prompt_shows(&mut app);
+    request(&mut app, 1, RequestKind::PinCode);
+    assert_eq!(focused(&app), None);
+    other_prompt_closes(&mut app);
+    assert_eq!(focused(&app), Some(parts(&app).pin.input.id()));
+}
+
+/// A new request taking the place of one shown moves the keyboard to its
+/// own field.
+#[test]
+fn the_next_request_takes_the_keyboard_to_its_field() {
+    let mut app = asking(RequestKind::PinCode);
+    signal(&mut app, PairingCancelled { id: 1 });
+    request(&mut app, 2, RequestKind::Passkey);
+    assert_eq!(focused(&app), Some(parts(&app).passkey.input.id()));
+}
+
+/// PINs and passkeys are kept out of the on-screen keyboard's learning.
+#[test]
+fn the_fields_are_marked_sensitive() {
+    let app = app();
+    let p = parts(&app);
+    for field in [p.pin, p.passkey] {
+        let input = app.widget::<Input>(field.input.id()).unwrap();
+        assert!(input.content_hint().contains(ContentHint::SENSITIVEDATA));
+    }
+}

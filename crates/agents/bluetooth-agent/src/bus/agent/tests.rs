@@ -406,8 +406,72 @@ fn display_calls_are_answered_at_once_and_take_no_slot() {
         }
     );
 
-    // A request still gets the slot.
-    let serial = send(&mut bus, "RequestAuthorization", &(path(WATCH),));
+    assert!(bus.app.resource::<Agent>().active.is_none());
+}
+
+/// bluetoothd may ask, for another device, while a code shows (it sends
+/// no `Cancel` for a code, even when its pairing fails): the request
+/// takes the code's place.
+#[test]
+fn a_request_takes_the_place_of_a_code_shown() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+    let old = requested(&mut bus).id;
+    bus.received();
+
+    let serial = send(&mut bus, "AuthorizeService", &(path(WATCH), "0000110b"));
+    assert!(answer(&bus.received(), serial).is_none());
+    let new = match seen(&mut bus).as_slice() {
+        [Saw::Cancelled(id), Saw::Requested(r)] if *id == old => r.clone(),
+        other => panic!("expected the code closed, then the request: {other:?}"),
+    };
+    assert_eq!(new.kind, RequestKind::Service("0000110b".into()));
+    let agent = bus.app.resource::<Agent>();
+    assert!(agent.shown.is_none());
+    assert!(agent.paired.is_none());
+    assert_eq!(agent.active.as_ref().map(|k| k.request.id), Some(new.id));
+}
+
+/// A new passkey, or one for another device, is a new code: it takes the
+/// old one's place, rather than move its keys typed.
+#[test]
+fn a_new_passkey_takes_the_place_of_the_old() {
+    for (device, passkey) in [(PHONE, 777_777u32), (WATCH, 42)] {
+        let mut bus = agent();
+        send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+        let old = requested(&mut bus).id;
+
+        send(&mut bus, "DisplayPasskey", &(path(device), passkey, 0u16));
+        let new = match seen(&mut bus).as_slice() {
+            [Saw::Cancelled(id), Saw::Requested(r)] if *id == old => r.clone(),
+            other => panic!("{device} {passkey}: {other:?}"),
+        };
+        assert_eq!(new.device.path, device);
+        assert_eq!(
+            new.kind,
+            RequestKind::DisplayPasskey {
+                passkey,
+                entered: 0
+            }
+        );
+        let agent = bus.app.resource::<Agent>();
+        let watched = agent.paired.as_ref().unwrap();
+        assert_eq!(watched.path, device);
+        assert!(watched.trust);
+    }
+}
+
+/// Once the code is gone, requests are taken again.
+#[test]
+fn a_request_is_taken_once_the_code_is_gone() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    bus.app.signal(PairingAbort { id });
+    bus.turn();
+    bus.received();
+
+    let serial = send(&mut bus, "RequestAuthorization", &(path(PHONE),));
     assert!(answer(&bus.received(), serial).is_none());
     assert_eq!(requested(&mut bus).kind, RequestKind::Authorization);
 }
@@ -730,4 +794,30 @@ fn a_failed_trust_is_let_go() {
     bus.error(&set, "org.bluez.Error.Failed", "No");
     bus.turn();
     assert!(bus.app.resource::<Agent>().trusting.is_none());
+}
+
+/// A checked pairing that failed tells the agent nothing: a pairing
+/// allowed without a code, coming after, is not trusted for it.
+#[test]
+fn a_failed_checked_pairing_trusts_nothing_after() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    assert!(bus.app.resource::<Agent>().paired.is_some());
+
+    // The pairing failed, unsaid. The same device asks again, without a
+    // code.
+    answered(&mut bus, "RequestAuthorization", Reply::Accept);
+    assert!(bus.app.resource::<Agent>().paired.is_none());
+    no_trust(&mut bus);
+}
+
+/// A code shown after a checked request watches its own device, not the
+/// one checked before.
+#[test]
+fn a_code_shown_after_trusts_only_its_own_device() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let agent = bus.app.resource::<Agent>();
+    assert_eq!(agent.paired.as_ref().unwrap().path, WATCH);
 }

@@ -24,6 +24,8 @@ pub(super) struct PairingDialog {
     pub(super) len: usize,
     /// The avatar's sprite: the device's kind.
     pub(super) avatar: SpriteId,
+    /// The field given the keyboard, if any.
+    pub(super) focused: Option<Entry>,
 }
 
 #[derive(Clone, Copy)]
@@ -121,6 +123,7 @@ impl Widget for PairingDialog {
             empty: true,
             len: 0,
             avatar: icons.bluetooth,
+            focused: None,
         }
     }
 }
