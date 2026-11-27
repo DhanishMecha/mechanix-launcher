@@ -18,8 +18,6 @@
 //! One system prompt shows at a time ([`prompt_queue`]): asked for while
 //! another shows, the request waits with the window hidden until
 //! [`PromptTurn`]; what it is told meanwhile is kept, and shown then.
-//!
-//! Not yet: closing for the lock screen.
 
 use mecha_wayland::prelude::*;
 use prompt_queue::{Owner, PromptTurn};

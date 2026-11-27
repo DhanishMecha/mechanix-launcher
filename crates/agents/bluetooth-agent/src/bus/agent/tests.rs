@@ -492,7 +492,13 @@ fn stopping_another_code_does_nothing() {
 /// `PropertiesChanged` for `device`'s `Device1`, as the agent's watch
 /// hears it.
 fn device_changed(bus: &mut FakeBus, device: &'static str, props: PropMap) {
-    let watch = bus.app.resource::<Agent>().paired.expect("a watch");
+    let watch = bus
+        .app
+        .resource::<Agent>()
+        .paired
+        .as_ref()
+        .expect("a watch")
+        .watch;
     bus.app.signal(SignalReceived {
         bus: BusId::Session,
         matches: [watch].into_iter().collect(),
@@ -587,4 +593,141 @@ fn the_watch_ends_with_the_code() {
     assert!(bus.app.resource::<Agent>().paired.is_some());
     send_empty(&mut bus, "Cancel");
     assert!(bus.app.resource::<Agent>().paired.is_none());
+}
+
+/// The `Set` of `device`'s `Trusted` to true the agent sent.
+fn expect_trust(bus: &mut FakeBus, device: &str) -> Message {
+    let call = bus.expect_call("Set");
+    assert_eq!(call.destination().unwrap().as_str(), BLUEZ);
+    assert_eq!(call.path().unwrap().as_str(), device);
+    assert_eq!(
+        call.interface().unwrap().as_str(),
+        "org.freedesktop.DBus.Properties"
+    );
+    let (interface, name, value) = call.body::<(String, String, Value)>().unwrap();
+    assert_eq!(interface, DEVICE_IFACE);
+    assert_eq!(name, "Trusted");
+    assert_eq!(value, Value::Bool(true));
+    call
+}
+
+/// Nothing set: no `Set` among what the agent sent.
+fn no_trust(bus: &mut FakeBus) {
+    let received = bus.received();
+    assert!(
+        received
+            .iter()
+            .all(|m| m.member().is_none_or(|m| m.as_str() != "Set")),
+        "trusted anyway"
+    );
+}
+
+/// `request` from bluetoothd for PHONE, answered with `reply`.
+fn answered(bus: &mut FakeBus, member: &'static str, reply: Reply) {
+    match member {
+        "RequestConfirmation" => send(bus, member, &(path(PHONE), 42u32)),
+        "AuthorizeService" => send(bus, member, &(path(PHONE), "0000110b")),
+        _ => send(bus, member, &(path(PHONE),)),
+    };
+    let id = requested(bus).id;
+    answer_with(bus, id, reply);
+    bus.received();
+}
+
+/// A code entered or confirmed: the device is trusted once paired, and
+/// not before.
+#[test]
+fn a_checked_code_trusts_the_device_once_paired() {
+    for (member, reply) in [
+        ("RequestConfirmation", Reply::Accept),
+        ("RequestPinCode", Reply::PinCode("0000".into())),
+        ("RequestPasskey", Reply::Passkey(123_456)),
+    ] {
+        let mut bus = agent();
+        answered(&mut bus, member, reply);
+        assert!(bus.app.resource::<Agent>().paired.is_some(), "{member}");
+        no_trust(&mut bus);
+
+        device_changed(&mut bus, PHONE, paired(true));
+        expect_trust(&mut bus, PHONE);
+        assert!(bus.app.resource::<Agent>().paired.is_none(), "{member}");
+    }
+}
+
+/// A code typed on the device: closed, and the device trusted.
+#[test]
+fn a_shown_code_trusts_the_device_once_paired() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+    let id = requested(&mut bus).id;
+    seen(&mut bus);
+    bus.received();
+
+    device_changed(&mut bus, PHONE, paired(true));
+    assert_eq!(seen(&mut bus), vec![Saw::Cancelled(id)]);
+    expect_trust(&mut bus, PHONE);
+}
+
+/// No code checked: a pairing allowed as is, a service, or a refusal.
+#[test]
+fn without_a_checked_code_nothing_is_trusted() {
+    for (member, reply) in [
+        ("RequestAuthorization", Reply::Accept),
+        ("AuthorizeService", Reply::Accept),
+        ("RequestConfirmation", Reply::Reject),
+        ("RequestPasskey", Reply::Passkey(MAX_PASSKEY + 1)),
+    ] {
+        let mut bus = agent();
+        answered(&mut bus, member, reply);
+        assert!(bus.app.resource::<Agent>().paired.is_none(), "{member}");
+    }
+}
+
+#[test]
+fn not_yet_paired_trusts_nothing() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    device_changed(&mut bus, PHONE, paired(false));
+    no_trust(&mut bus);
+    assert!(bus.app.resource::<Agent>().paired.is_some());
+}
+
+/// bluetoothd cancelled before the device paired: nothing trusted.
+#[test]
+fn a_cancelled_pairing_trusts_nothing() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    send_empty(&mut bus, "Cancel");
+    assert!(bus.app.resource::<Agent>().paired.is_none());
+    no_trust(&mut bus);
+}
+
+/// The user stopped the shown code: nothing trusted.
+#[test]
+fn a_stopped_code_trusts_nothing() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    let id = requested(&mut bus).id;
+    bus.app.signal(PairingAbort { id });
+    bus.turn();
+    assert!(bus.app.resource::<Agent>().paired.is_none());
+    let received = bus.received();
+    assert!(
+        received
+            .iter()
+            .all(|m| m.member().is_none_or(|m| m.as_str() != "Set"))
+    );
+}
+
+/// bluetoothd refused: the device stays paired, untrusted; nothing kept.
+#[test]
+fn a_failed_trust_is_let_go() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    device_changed(&mut bus, PHONE, paired(true));
+    let set = expect_trust(&mut bus, PHONE);
+    assert!(bus.app.resource::<Agent>().trusting.is_some());
+    bus.error(&set, "org.bluez.Error.Failed", "No");
+    bus.turn();
+    assert!(bus.app.resource::<Agent>().trusting.is_none());
 }

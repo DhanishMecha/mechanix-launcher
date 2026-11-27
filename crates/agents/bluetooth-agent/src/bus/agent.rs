@@ -11,6 +11,14 @@
 //! `CancelPairing`. bluetoothd sends no `Cancel` once a shown code did its
 //! job, so the device's `Paired` is watched while it shows: turning true,
 //! the code is done.
+//!
+//! A device paired with a code the user checked is trusted: once its
+//! `Paired` turns true, its `Trusted` is set, so bluetoothd lets it
+//! reconnect, and connect its services, without asking again. That is a
+//! code shown (typed on the device), entered (PIN, passkey) or confirmed.
+//! A pairing allowed without a code (`RequestAuthorization`) is not
+//! trusted: its services still ask. Rejected, stopped or cancelled, the
+//! pairing trusts nothing.
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
@@ -42,10 +50,21 @@ pub(crate) struct Agent {
     shown: Option<Request>,
     /// `CancelPairing` in flight, and the device it stops.
     aborting: Option<(CallId, ObjectPath)>,
-    /// The watch on the shown code's device, for its `Paired`.
-    paired: Option<MatchId>,
+    /// The watch on the device being paired, for its `Paired`.
+    paired: Option<PairedWatch>,
+    /// Setting `Trusted` in flight, and the device it trusts.
+    trusting: Option<(CallId, ObjectPath)>,
 }
 impl Resource for Agent {}
+
+/// A device whose `Paired` is watched: a code shown for it, or a code
+/// for it accepted.
+struct PairedWatch {
+    watch: MatchId,
+    path: ObjectPath,
+    /// Set its `Trusted` once paired.
+    trust: bool,
+}
 
 /// Export the agent on `bus`; false if that failed. Installs after
 /// `DBusModule`.
@@ -76,12 +95,14 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         shown: None,
         aborting: None,
         paired: None,
+        trusting: None,
     });
     app.system(on_call)
         .system(on_answer)
         .system(on_abort)
         .system(on_abort_reply)
         .system(on_paired)
+        .system(on_trust_reply)
         .system(on_disconnect);
     device::install(app, bus);
     exported
@@ -234,13 +255,15 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
         kind,
     };
     app.resource_mut::<Agent>().shown = Some(request.clone());
-    watch_paired(app, &path);
+    // Typed on the device: a checked code.
+    watch_paired(app, &path, true);
     app.signal(PairingRequested(request));
     device::read(app, id, &path);
 }
 
-/// Follow `path`'s `Paired`, in place of the device watched before.
-fn watch_paired(app: &mut App, path: &ObjectPath) {
+/// Follow `path`'s `Paired`, in place of the device watched before;
+/// `trust` it once paired.
+fn watch_paired(app: &mut App, path: &ObjectPath, trust: bool) {
     unwatch_paired(app);
     let bus = app.resource::<Agent>().bus;
     let watch = {
@@ -248,24 +271,29 @@ fn watch_paired(app: &mut App, path: &ObjectPath) {
         dbus.bus(bus)
             .map(|mut b| b.watch_properties(BLUEZ, path.clone(), DEVICE_IFACE))
     };
-    app.resource_mut::<Agent>().paired = watch;
+    app.resource_mut::<Agent>().paired = watch.map(|watch| PairedWatch {
+        watch,
+        path: path.clone(),
+        trust,
+    });
 }
 
 fn unwatch_paired(app: &mut App) {
-    let (bus, watch) = {
+    let (bus, watched) = {
         let mut agent = app.resource_mut::<Agent>();
         (agent.bus, agent.paired.take())
     };
-    if let Some(watch) = watch
+    if let Some(watched) = watched
         && let Some(mut b) = app.resource_mut::<DBus>().bus(bus)
     {
-        b.remove_match(watch);
+        b.remove_match(watched.watch);
     }
 }
 
-/// The shown code's device is paired: the code did its job, close it.
+/// The watched device is paired: a code shown for it did its job, close
+/// it; and trust the device, if its code was checked.
 fn on_paired(app: &mut App, e: &SignalReceived) {
-    let Some(watch) = app.resource::<Agent>().paired else {
+    let Some(watch) = app.resource::<Agent>().paired.as_ref().map(|w| w.watch) else {
         return;
     };
     if !e.matches.contains(&watch) {
@@ -281,11 +309,53 @@ fn on_paired(app: &mut App, e: &SignalReceived) {
     if !paired {
         return;
     }
-    let shown = app.resource_mut::<Agent>().shown.take();
+    let (path, trust) = {
+        let agent = app.resource::<Agent>();
+        let watched = agent.paired.as_ref().expect("checked above");
+        (watched.path.clone(), watched.trust)
+    };
+    tracing::info!("bluetooth: {path} is paired");
+    let shown = {
+        let mut agent = app.resource_mut::<Agent>();
+        agent.shown.take_if(|s| s.device.path == path)
+    };
     unwatch_paired(app);
     if let Some(shown) = shown {
-        tracing::info!("bluetooth: {} is paired", shown.device.path);
         app.signal(PairingCancelled { id: shown.id });
+    }
+    if trust {
+        set_trusted(app, path);
+    }
+}
+
+/// Set `path`'s `Trusted`: bluetoothd lets it reconnect, and connect its
+/// services, without asking.
+fn set_trusted(app: &mut App, path: ObjectPath) {
+    let bus = app.resource::<Agent>().bus;
+    let call = {
+        let mut dbus = app.resource_mut::<DBus>();
+        let Some(b) = dbus.bus(bus) else {
+            tracing::error!("bluetooth: trusting {path}: the bus is not connected");
+            return;
+        };
+        b.object(BLUEZ, path.clone())
+            .set_property(DEVICE_IFACE, "Trusted", Value::Bool(true))
+    };
+    tracing::info!("bluetooth: trusting {path}");
+    app.resource_mut::<Agent>().trusting = Some((call, path));
+}
+
+fn on_trust_reply(app: &mut App, e: &MethodReply) {
+    let path = {
+        let mut agent = app.resource_mut::<Agent>();
+        match &agent.trusting {
+            Some((call, _)) if *call == e.call => agent.trusting.take().map(|(_, p)| p),
+            _ => return,
+        }
+    };
+    if let (Err(error), Some(path)) = (&e.result, path) {
+        // Paired still; its services will ask, as for an untrusted one.
+        tracing::warn!("bluetooth: trusting {path} failed: {error:?}");
     }
 }
 
@@ -326,6 +396,18 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
         agent.active.take()
     };
     let Some(kept) = kept else { return };
+    // A checked code accepted: trust the device once paired. Watched
+    // before the reply goes, so `Paired` turning true is not missed.
+    let checked = match (&kept.request.kind, &e.reply) {
+        (RequestKind::PinCode, Reply::PinCode(pin)) => valid_pin(pin),
+        (RequestKind::Passkey, Reply::Passkey(passkey)) => valid_passkey(*passkey),
+        (RequestKind::Confirmation(_), Reply::Accept) => true,
+        // Authorization, a service, or a rejection: nothing checked.
+        _ => false,
+    };
+    if checked {
+        watch_paired(app, &kept.request.device.path, true);
+    }
     let mut dbus = app.resource_mut::<DBus>();
     let call = &kept.call;
     match (&kept.request.kind, &e.reply) {
@@ -466,6 +548,7 @@ fn on_disconnect(app: &mut App, e: &BusDisconnected) {
         }
         agent.bluetoothd = None;
         agent.aborting = None;
+        agent.trusting = None;
         // Its matches went with the bus.
         agent.paired = None;
         (agent.active.take(), agent.shown.take())
