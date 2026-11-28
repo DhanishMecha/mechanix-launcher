@@ -1,36 +1,18 @@
-//! The agent on the bus: exports `org.bluez.Agent1`.
+//! The `org.bluez.Agent1` object that bluetoothd calls to pair devices.
 //!
-//! bluetoothd keeps one request per agent in flight, so there is one
-//! active slot: a request call kept unanswered until the dialog answers.
-//! One arriving while the slot is taken gets `Canceled`. Only the
-//! registered bluetoothd may call; others get `AccessDenied`. PINs and
-//! passkeys are never logged.
-//!
-//! The display calls are answered at once and kept apart, as the code
-//! shown; they never take the slot. bluetoothd counts a code shown as
-//! done once answered (`DisplayPasskey` waits for no answer,
-//! `DisplayPinCode` frees its slot on it), so it sends no `Cancel` for
-//! it, even when the pairing fails, and may ask something else while it
-//! still shows. So the newest wins: a request, or another code, takes the
-//! place of the code shown. A `DisplayPasskey` for the same device and
-//! passkey only moves the keys typed.
-//!
-//! Stopping a shown code ([`PairingAbort`]) calls the device's
-//! `CancelPairing`. The device's `Paired` is watched while a code shows:
-//! turning true, the code is done.
-//!
-//! A device paired with a code the user checked is trusted: once its
-//! `Paired` turns true, its `Trusted` is set, so bluetoothd lets it
-//! reconnect, and connect its services, without asking again. That is a
-//! code shown (typed on the device), entered (PIN, passkey) or confirmed.
-//! A pairing allowed without a code (`RequestAuthorization`) is not
-//! trusted: its services still ask. A failed pairing tells the agent
-//! nothing, so the trust is dropped by anything that comes after it: a
-//! new request or code, as well as a rejection, a stop or a `Cancel`.
-//! Known gap: if nothing comes after it, and the same device is then
-//! paired without asking the agent (a "just works" pairing started from
-//! this side, which bluetoothd accepts by itself), that pairing is
-//! trusted too, as the agent cannot tell it from the checked one.
+//! - Only the registered bluetoothd may call. PINs and passkeys are never
+//!   logged.
+//! - One request at a time waits for the dialog's answer; another one
+//!   arriving meanwhile gets `Canceled`.
+//! - Display calls are answered at once and bluetoothd never cancels
+//!   them, so the newest request or code replaces the code shown. A code
+//!   shown closes when its device's `Paired` turns true.
+//! - A device paired with a code the user checked (shown, entered or
+//!   confirmed) is set `Trusted`. Anything that comes next, or
+//!   [`TRUST_WINDOW`] passing, cancels that. Known gap: within the window,
+//!   a "just works" pairing of the same device is trusted too.
+
+use std::time::Duration;
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
@@ -44,7 +26,11 @@ use crate::signals::{
     PairingUpdated, Reply, Request, RequestKind, valid_passkey, valid_pin,
 };
 
-/// A request, and its call, kept unanswered.
+/// How long a checked device may take to pair and still be trusted
+/// (SMP gives up after 30 s).
+const TRUST_WINDOW: Duration = Duration::from_secs(60);
+
+/// A request whose call is not answered yet.
 struct PendingCall {
     request: Request,
     call: IncomingCall,
@@ -53,33 +39,32 @@ struct PendingCall {
 pub(crate) struct Agent {
     bus: BusId,
     export: Option<ExportId>,
-    /// The only caller taken: bluetoothd's unique name, while
-    /// registered. Set by `register`, which reads it back from here.
+    /// The only caller accepted; set by `register`.
     bluetoothd: Option<BusName>,
     next_id: u64,
     active: Option<PendingCall>,
-    /// The PIN or passkey shown, already answered.
+    /// The code on screen (already answered).
     shown: Option<Request>,
-    /// `CancelPairing` in flight, and the device it stops.
+    /// `CancelPairing` in flight.
     aborting: Option<(CallId, ObjectPath)>,
-    /// The watch on the device being paired, for its `Paired`.
     paired: Option<PairedWatch>,
-    /// Setting `Trusted` in flight, and the device it trusts.
+    /// `Trusted` being set.
     trusting: Option<(CallId, ObjectPath)>,
+    /// [`TRUST_WINDOW`] timeouts not yet finished, current or replaced.
+    timeouts: Vec<Token>,
 }
 impl Resource for Agent {}
 
-/// A device whose `Paired` is watched: a code shown for it, or a code
-/// for it accepted.
+/// Watches a device's `Paired`, for a code shown or accepted.
 struct PairedWatch {
     watch: MatchId,
     path: ObjectPath,
-    /// Set its `Trusted` once paired.
+    /// Set `Trusted` once paired; cleared when the window ends.
     trust: bool,
+    expires: Token,
 }
 
-/// Export the agent on `bus`; false if that failed. Installs after
-/// `DBusModule`.
+/// Export the agent on `bus`; false if that failed.
 pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
     if app.has_resource::<Agent>() {
         return app.resource::<Agent>().export.is_some();
@@ -108,6 +93,7 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         aborting: None,
         paired: None,
         trusting: None,
+        timeouts: Vec::new(),
     });
     app.system(on_call)
         .system(on_answer)
@@ -115,6 +101,7 @@ pub(crate) fn install(app: &mut App, bus: BusId) -> bool {
         .system(on_abort_reply)
         .system(on_paired)
         .system(on_trust_reply)
+        .system(on_timeout)
         .system(on_disconnect);
     device::install(app, bus);
     exported
@@ -206,8 +193,8 @@ fn bad_args(app: &mut App, call: &IncomingCall, error: DecodeError) {
         .reply_error(call, REJECTED, "Bad arguments");
 }
 
-/// A call waiting for the dialog: take the slot, or refuse while it is
-/// taken. It takes the place of a code shown, and of a trust pending.
+/// A call for the dialog: refused while another waits, otherwise it
+/// replaces the code shown and any pending trust.
 fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKind) {
     if app.resource::<Agent>().active.is_some() {
         tracing::warn!(
@@ -220,7 +207,7 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
     }
     tracing::info!("bluetooth: {} for {path}", call.member());
     replace_shown(app);
-    // Whatever was checked before did not pair: trust nothing of it.
+    // A code checked before did not pair: don't trust it.
     unwatch_paired(app);
     let id = next_id(app);
     let request = Request {
@@ -236,8 +223,7 @@ fn request(app: &mut App, call: &IncomingCall, path: ObjectPath, kind: RequestKi
     device::read(app, id, &path);
 }
 
-/// A code to show, already answered. The passkey shown again, for the
-/// same device, only moves `entered`; anything else takes its place.
+/// Show a code. The same passkey and device again only updates `entered`.
 fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
     let update = {
         let mut agent = app.resource_mut::<Agent>();
@@ -285,8 +271,7 @@ fn show(app: &mut App, path: ObjectPath, kind: RequestKind) {
     device::read(app, id, &path);
 }
 
-/// The code shown, if any, gives way to what comes now: the dialog
-/// closes it. Its pairing goes on, unseen; bluetoothd asked for the next.
+/// Close the code shown, if any; its pairing goes on unseen.
 fn replace_shown(app: &mut App) {
     let Some(old) = app.resource_mut::<Agent>().shown.take() else {
         return;
@@ -296,8 +281,7 @@ fn replace_shown(app: &mut App) {
     app.signal(PairingCancelled { id: old.id });
 }
 
-/// Follow `path`'s `Paired`, in place of the device watched before;
-/// `trust` it once paired.
+/// Watch `path`'s `Paired` instead of the previous device.
 fn watch_paired(app: &mut App, path: &ObjectPath, trust: bool) {
     unwatch_paired(app);
     let bus = app.resource::<Agent>().bus;
@@ -306,11 +290,47 @@ fn watch_paired(app: &mut App, path: &ObjectPath, trust: bool) {
         dbus.bus(bus)
             .map(|mut b| b.watch_properties(BLUEZ, path.clone(), DEVICE_IFACE))
     };
-    app.resource_mut::<Agent>().paired = watch.map(|watch| PairedWatch {
+    let Some(watch) = watch else {
+        return;
+    };
+    let (mut agent, mut ring) = app.query::<(ResMut<Agent>, ResMut<Ring>)>();
+    let expires = ring.timeout(TRUST_WINDOW);
+    agent.timeouts.push(expires);
+    agent.paired = Some(PairedWatch {
         watch,
         path: path.clone(),
         trust,
+        expires,
     });
+}
+
+/// The current watch's window ended unpaired: no trust. A code still
+/// shown keeps its watch so it closes once paired.
+fn on_timeout(app: &mut App, e: &IoEvent) {
+    let shown = {
+        let (mut agent, mut ring) = app.query::<(ResMut<Agent>, ResMut<Ring>)>();
+        let Some(i) = agent.timeouts.iter().position(|t| *t == e.token) else {
+            return;
+        };
+        agent.timeouts.swap_remove(i);
+        ring.finish(e.token);
+        let agent = &mut *agent;
+        let Some(watched) = agent.paired.as_mut().filter(|w| w.expires == e.token) else {
+            return;
+        };
+        tracing::info!(
+            "bluetooth: {} did not pair in time, it will not be trusted",
+            watched.path
+        );
+        watched.trust = false;
+        agent
+            .shown
+            .as_ref()
+            .is_some_and(|s| s.device.path == watched.path)
+    };
+    if !shown {
+        unwatch_paired(app);
+    }
 }
 
 fn unwatch_paired(app: &mut App) {
@@ -325,8 +345,7 @@ fn unwatch_paired(app: &mut App) {
     }
 }
 
-/// The watched device is paired: a code shown for it did its job, close
-/// it; and trust the device, if its code was checked.
+/// The watched device paired: close its code and trust it if allowed.
 fn on_paired(app: &mut App, e: &SignalReceived) {
     let (path, trust) = match &app.resource::<Agent>().paired {
         Some(w) if e.matches.contains(&w.watch) => (w.path.clone(), w.trust),
@@ -356,8 +375,7 @@ fn on_paired(app: &mut App, e: &SignalReceived) {
     }
 }
 
-/// Set `path`'s `Trusted`: bluetoothd lets it reconnect, and connect its
-/// services, without asking.
+/// Set `Trusted`, so the device reconnects and uses services unasked.
 fn set_trusted(app: &mut App, path: ObjectPath) {
     let bus = app.resource::<Agent>().bus;
     let call = {
@@ -382,7 +400,7 @@ fn on_trust_reply(app: &mut App, e: &MethodReply) {
         }
     };
     if let (Err(error), Some(path)) = (&e.result, path) {
-        // Paired still; its services will ask, as for an untrusted one.
+        // Still paired, just untrusted.
         tracing::warn!("bluetooth: trusting {path} failed: {error:?}");
     }
 }
@@ -394,8 +412,8 @@ fn next_id(app: &mut App) -> u64 {
     id
 }
 
-/// Request `id`'s device was read: keep what `change` makes of it, and
-/// tell the dialog. Nothing if the request has ended.
+/// Apply `change` to request `id`'s device and tell the dialog, if the
+/// request is still open.
 pub(crate) fn update_device(app: &mut App, id: u64, change: impl FnOnce(DeviceInfo) -> DeviceInfo) {
     let device = {
         let mut agent = app.resource_mut::<Agent>();
@@ -424,9 +442,8 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
         agent.active.take()
     };
     let Some(kept) = kept else { return };
-    // A checked code accepted (entered or confirmed): trust the device
-    // once paired. Watched before the reply goes, so `Paired` turning
-    // true is not missed. Authorization or a service checks nothing.
+    // A code entered or confirmed: trust once paired. Watch before
+    // replying so `Paired` can't be missed.
     let path = &kept.request.device.path;
     let call = &kept.call;
     match (&kept.request.kind, &e.reply) {
@@ -465,8 +482,7 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
     tracing::info!("bluetooth: {} accepted", call.member());
 }
 
-/// The user stopped the pairing whose code is shown: forget the code,
-/// and ask bluetoothd to stop pairing with the device.
+/// The user stopped a shown code: forget it and call `CancelPairing`.
 fn on_abort(app: &mut App, e: &PairingAbort) {
     let (bus, path) = {
         let mut agent = app.resource_mut::<Agent>();
@@ -502,7 +518,7 @@ fn on_abort_reply(app: &mut App, e: &MethodReply) {
         }
     };
     if let (Err(error), Some(path)) = (&e.result, path) {
-        // Often only that the pairing had ended already.
+        // Usually the pairing had already ended.
         tracing::warn!("bluetooth: CancelPairing for {path} failed: {error:?}");
     }
 }
@@ -517,8 +533,7 @@ fn reply_name(reply: &Reply) -> &'static str {
     }
 }
 
-/// bluetoothd unregistered the agent: drop everything, and take no more
-/// calls until registered again.
+/// bluetoothd unregistered the agent: drop everything until re-registered.
 fn release(app: &mut App, call: &IncomingCall) {
     app.resource_mut::<DBus>().reply(call, &());
     tracing::info!("bluetooth: the agent was released");
@@ -526,7 +541,7 @@ fn release(app: &mut App, call: &IncomingCall) {
     drop_all(app);
 }
 
-/// End the open request, answering `Canceled`, and what is shown.
+/// Cancel the open request and close the code shown.
 fn drop_all(app: &mut App) {
     let (active, shown) = {
         let mut agent = app.resource_mut::<Agent>();
@@ -545,8 +560,7 @@ fn drop_all(app: &mut App) {
     }
 }
 
-/// Take calls only from `bluetoothd`. A new bluetoothd drops every
-/// request.
+/// Accept calls only from `bluetoothd`; a change drops everything.
 pub(crate) fn set_bluetoothd(app: &mut App, bluetoothd: Option<BusName>) {
     {
         let mut agent = app.resource_mut::<Agent>();
@@ -563,8 +577,7 @@ pub(crate) fn bluetoothd(app: &App) -> Option<BusName> {
     app.resource::<Agent>().bluetoothd.clone()
 }
 
-/// The bus is gone, and bluetoothd's calls with it: drop them, and
-/// close the dialog.
+/// The bus is gone: drop everything and close the dialog.
 fn on_disconnect(app: &mut App, e: &BusDisconnected) {
     let (active, shown) = {
         let mut agent = app.resource_mut::<Agent>();

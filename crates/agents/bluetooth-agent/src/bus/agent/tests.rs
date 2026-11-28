@@ -821,3 +821,59 @@ fn a_code_shown_after_trusts_only_its_own_device() {
     let agent = bus.app.resource::<Agent>();
     assert_eq!(agent.paired.as_ref().unwrap().path, WATCH);
 }
+
+/// The current watch's trust window fires, as the ring would.
+fn time_out(bus: &mut FakeBus, token: Token) {
+    // -ETIME: a timeout that ran out.
+    bus.app.signal(IoEvent { token, result: -62 });
+    bus.turn();
+}
+
+fn expires(bus: &FakeBus) -> Token {
+    bus.app.resource::<Agent>().paired.as_ref().unwrap().expires
+}
+
+/// A checked code whose device did not pair in time: the watch ends, so
+/// a later pairing of it is not trusted.
+#[test]
+fn a_checked_code_not_paired_in_time_trusts_nothing() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    let token = expires(&bus);
+    time_out(&mut bus, token);
+    let agent = bus.app.resource::<Agent>();
+    assert!(agent.paired.is_none());
+    assert!(agent.timeouts.is_empty());
+}
+
+/// A shown code past its window still closes once paired, but its
+/// device is not trusted.
+#[test]
+fn a_shown_code_not_paired_in_time_closes_untrusted() {
+    let mut bus = agent();
+    send(&mut bus, "DisplayPasskey", &(path(PHONE), 42u32, 0u16));
+    let id = requested(&mut bus).id;
+    bus.received();
+    let token = expires(&bus);
+    time_out(&mut bus, token);
+    assert!(!bus.app.resource::<Agent>().paired.as_ref().unwrap().trust);
+
+    device_changed(&mut bus, PHONE, paired(true));
+    assert_eq!(seen(&mut bus), vec![Saw::Cancelled(id)]);
+    no_trust(&mut bus);
+}
+
+/// The window of a watch since replaced changes nothing.
+#[test]
+fn a_replaced_watch_window_is_ignored() {
+    let mut bus = agent();
+    answered(&mut bus, "RequestConfirmation", Reply::Accept);
+    let old = expires(&bus);
+    send(&mut bus, "DisplayPinCode", &(path(WATCH), "1234"));
+    time_out(&mut bus, old);
+    let agent = bus.app.resource::<Agent>();
+    let watched = agent.paired.as_ref().unwrap();
+    assert_eq!(watched.path, WATCH);
+    assert!(watched.trust);
+    assert_eq!(agent.timeouts, vec![watched.expires]);
+}
