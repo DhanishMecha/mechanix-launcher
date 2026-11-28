@@ -12,9 +12,8 @@ use super::interface::{BLUEZ, DEVICE_IFACE};
 use crate::signals::DeviceInfo;
 
 /// `GetAll` calls in flight, and the request each is for.
-#[derive(Default)]
 struct Reads {
-    bus: Option<BusId>,
+    bus: BusId,
     calls: Vec<(CallId, u64)>,
 }
 impl Resource for Reads {}
@@ -24,7 +23,7 @@ pub(crate) fn install(app: &mut App, bus: BusId) {
         return;
     }
     app.insert_resource(Reads {
-        bus: Some(bus),
+        bus,
         calls: Vec::new(),
     });
     app.system(on_reply).system(on_disconnect);
@@ -50,9 +49,7 @@ pub(crate) fn from_path(path: ObjectPath) -> DeviceInfo {
 
 /// Read the name and icon of request `id`'s device.
 pub(crate) fn read(app: &mut App, id: u64, path: &ObjectPath) {
-    let Some(bus) = app.resource::<Reads>().bus else {
-        return;
-    };
+    let bus = app.resource::<Reads>().bus;
     let call = {
         let mut dbus = app.resource_mut::<DBus>();
         let Some(b) = dbus.bus(bus) else {
@@ -110,7 +107,7 @@ fn on_reply(app: &mut App, e: &MethodReply) {
 
 fn on_disconnect(app: &mut App, e: &BusDisconnected) {
     let mut reads = app.resource_mut::<Reads>();
-    if reads.bus == Some(e.bus) {
+    if reads.bus == e.bus {
         reads.calls.clear();
     }
 }

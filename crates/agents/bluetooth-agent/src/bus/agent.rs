@@ -27,7 +27,10 @@
 //! trusted: its services still ask. A failed pairing tells the agent
 //! nothing, so the trust is dropped by anything that comes after it: a
 //! new request or code, as well as a rejection, a stop or a `Cancel`.
-//! Only the pairing that was checked is trusted.
+//! Known gap: if nothing comes after it, and the same device is then
+//! paired without asking the agent (a "just works" pairing started from
+//! this side, which bluetoothd accepts by itself), that pairing is
+//! trusted too, as the agent cannot tell it from the checked one.
 
 use mecha_wayland::dbus::DecodeError;
 use mecha_wayland::prelude::*;
@@ -325,12 +328,10 @@ fn unwatch_paired(app: &mut App) {
 /// The watched device is paired: a code shown for it did its job, close
 /// it; and trust the device, if its code was checked.
 fn on_paired(app: &mut App, e: &SignalReceived) {
-    let Some(watch) = app.resource::<Agent>().paired.as_ref().map(|w| w.watch) else {
-        return;
+    let (path, trust) = match &app.resource::<Agent>().paired {
+        Some(w) if e.matches.contains(&w.watch) => (w.path.clone(), w.trust),
+        _ => return,
     };
-    if !e.matches.contains(&watch) {
-        return;
-    }
     let paired = match PropertiesChanged::parse(&e.msg) {
         Ok((_, changed, _)) => matches!(changed.get_as::<bool>("Paired"), Some(Ok(true))),
         Err(error) => {
@@ -341,11 +342,6 @@ fn on_paired(app: &mut App, e: &SignalReceived) {
     if !paired {
         return;
     }
-    let (path, trust) = {
-        let agent = app.resource::<Agent>();
-        let watched = agent.paired.as_ref().expect("checked above");
-        (watched.path.clone(), watched.trust)
-    };
     tracing::info!("bluetooth: {path} is paired");
     let shown = {
         let mut agent = app.resource_mut::<Agent>();
@@ -428,34 +424,31 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
         agent.active.take()
     };
     let Some(kept) = kept else { return };
-    // A checked code accepted: trust the device once paired. Watched
-    // before the reply goes, so `Paired` turning true is not missed.
-    let checked = match (&kept.request.kind, &e.reply) {
-        (RequestKind::PinCode, Reply::PinCode(pin)) => valid_pin(pin),
-        (RequestKind::Passkey, Reply::Passkey(passkey)) => valid_passkey(*passkey),
-        (RequestKind::Confirmation(_), Reply::Accept) => true,
-        // Authorization, a service, or a rejection: nothing checked.
-        _ => false,
-    };
-    if checked {
-        watch_paired(app, &kept.request.device.path, true);
-    }
-    let mut dbus = app.resource_mut::<DBus>();
+    // A checked code accepted (entered or confirmed): trust the device
+    // once paired. Watched before the reply goes, so `Paired` turning
+    // true is not missed. Authorization or a service checks nothing.
+    let path = &kept.request.device.path;
     let call = &kept.call;
     match (&kept.request.kind, &e.reply) {
         (RequestKind::PinCode, Reply::PinCode(pin)) if valid_pin(pin) => {
-            dbus.reply(call, &(pin.as_str(),));
+            watch_paired(app, path, true);
+            app.resource_mut::<DBus>().reply(call, &(pin.as_str(),));
         }
         (RequestKind::Passkey, Reply::Passkey(passkey)) if valid_passkey(*passkey) => {
-            dbus.reply(call, &(*passkey,));
+            watch_paired(app, path, true);
+            app.resource_mut::<DBus>().reply(call, &(*passkey,));
         }
-        (
-            RequestKind::Confirmation(_) | RequestKind::Authorization | RequestKind::Service(_),
-            Reply::Accept,
-        ) => dbus.reply(call, &()),
+        (RequestKind::Confirmation(_), Reply::Accept) => {
+            watch_paired(app, path, true);
+            app.resource_mut::<DBus>().reply(call, &());
+        }
+        (RequestKind::Authorization | RequestKind::Service(_), Reply::Accept) => {
+            app.resource_mut::<DBus>().reply(call, &());
+        }
         (_, Reply::Reject) => {
             tracing::info!("bluetooth: {} rejected", call.member());
-            dbus.reply_error(call, REJECTED, "Rejected by the user");
+            app.resource_mut::<DBus>()
+                .reply_error(call, REJECTED, "Rejected by the user");
             return;
         }
         (_, reply) => {
@@ -464,7 +457,8 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
                 call.member(),
                 reply_name(reply)
             );
-            dbus.reply_error(call, REJECTED, "Invalid answer");
+            app.resource_mut::<DBus>()
+                .reply_error(call, REJECTED, "Invalid answer");
             return;
         }
     }
@@ -476,10 +470,9 @@ fn on_answer(app: &mut App, e: &PairingAnswer) {
 fn on_abort(app: &mut App, e: &PairingAbort) {
     let (bus, path) = {
         let mut agent = app.resource_mut::<Agent>();
-        if agent.shown.as_ref().is_none_or(|s| s.id != e.id) {
+        let Some(shown) = agent.shown.take_if(|s| s.id == e.id) else {
             return;
-        }
-        let shown = agent.shown.take().expect("checked above");
+        };
         (agent.bus, shown.device.path)
     };
     unwatch_paired(app);
